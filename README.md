@@ -279,10 +279,10 @@ writing a persona that stays in character.
 ```bash
 pip install -r requirements-dev.txt
 
-ruff check .            # lint
-ruff format .           # format
-mypy arcane             # type-check (strict)
-pytest                  # tests
+ruff check .                 # lint
+ruff format .                # format
+python -m mypy arcane tests   # type-check (strict)
+pytest                       # tests
 ```
 
 Set `ARCANE_HUMANIZE=false` and `ARCANE_LOG_LEVEL=DEBUG` while iterating to remove
