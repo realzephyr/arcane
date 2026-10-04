@@ -1,20 +1,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
-from arcane.ai.providers.base import (
-    ChatMessage,
-    GenerationOptions,
-    GenerationResult,
-    LLMProvider,
-    ProviderHealth,
-    ProviderUnavailableError,
-)
+from arcane.ai.providers.base import ProviderUnavailableError
 from arcane.core.clock import utcnow
 from arcane.core.models import ReplyReference
 from arcane.database.database import Database
@@ -29,6 +22,7 @@ from arcane.memory.filters import contains_sensitive_data, normalize_memory_text
 from arcane.memory.long_term import LongTermMemory
 from arcane.memory.short_term import ShortTermMemory
 from tests.factories import GENERAL, from_bot, history, incoming
+from tests.fakes import ScriptedProvider
 
 
 @pytest.fixture
@@ -243,33 +237,6 @@ def test_filters() -> None:
 # ------------------------------------------------------------------- extraction
 
 
-class ScriptedProvider(LLMProvider):
-    name = "scripted"
-
-    def __init__(self, reply: str | Exception) -> None:
-        self.reply = reply
-        self.calls: list[tuple[Sequence[ChatMessage], GenerationOptions | None]] = []
-
-    @property
-    def default_model(self) -> str:
-        return "test-model"
-
-    async def chat(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        model: str | None = None,
-        options: GenerationOptions | None = None,
-    ) -> GenerationResult:
-        self.calls.append((messages, options))
-        if isinstance(self.reply, Exception):
-            raise self.reply
-        return GenerationResult(content=self.reply, model="test-model", provider=self.name)
-
-    async def health_check(self, model: str | None = None) -> ProviderHealth:
-        return ProviderHealth(available=True, detail="ok")
-
-
 def test_parse_candidates_is_lenient() -> None:
     raw = (
         "<think>hmm</think>```json\n"
@@ -306,7 +273,7 @@ async def test_llm_extractor_uses_json_mode_and_survives_failures() -> None:
     candidates = await extractor.extract(transcript, {1: "alice"})
 
     assert [c.content for c in candidates] == ["loves Spinoza"]
-    messages, options = provider.calls[0]
+    messages, options, _ = provider.calls[0]
     assert options is not None and options.json_mode
     assert "alice: spinoza is the best" in messages[-1].content
     assert "mp3: why?" in messages[-1].content
