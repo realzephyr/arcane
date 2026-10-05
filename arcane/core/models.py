@@ -22,6 +22,8 @@ class ChannelInfo:
     guild_name: str | None = None
     topic: str | None = None
     is_dm: bool = False
+    parent_id: int | None = None
+    """For threads: the channel the thread belongs to."""
 
     @property
     def display_name(self) -> str:
