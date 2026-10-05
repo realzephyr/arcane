@@ -12,7 +12,21 @@ from arcane.core.models import ChannelInfo, IncomingMessage, ReplyReference
 MAX_REPLY_SNIPPET_CHARS = 300
 
 _CONVERSATIONAL_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
-_LEADING_MENTIONS_RE = re.compile(r"^\s*(?:<@!?\d+>[\s,:;-]*)+")
+# Mentions that open a message, after emoji, punctuation and a filler word or
+# two: "<@2> thoughts?", "yo <@2> hop in vc", "lol <@2> what was that".
+_LEADING_FILLER = r"(?:yo+|hey+|ok|okay|bro|bruh|lol|lmao|so|and|wait|nah|yeah|ayo|oi|also|btw)"
+# Punctuation, unicode emoji and custom emoji ("<:skull:123>"), not mentions.
+_LEADING_NOISE = r"(?:[^\w<]|<a?:\w+:\d+>)*"
+_LEADING_MENTIONS_RE = re.compile(
+    "^"
+    + _LEADING_NOISE
+    + r"(?:"
+    + _LEADING_FILLER
+    + r"\b"
+    + _LEADING_NOISE
+    + r"){0,3}(?:<@!?\d+>[\s,:;-]*)+",
+    re.IGNORECASE,
+)
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 
@@ -78,7 +92,11 @@ def to_incoming(message: discord.Message, bot_user_id: int) -> IncomingMessage:
 
 
 def _leading_mentions(raw_content: str) -> set[int]:
-    """User ids @mentioned at the very start of the raw message content."""
+    """User ids @mentioned at the start of the raw message content.
+
+    A short filler word ("yo", "hey", "lol") and emoji may come first, but any
+    other word means the mentions are in passing: "i told <@2> about it".
+    """
     match = _LEADING_MENTIONS_RE.match(raw_content)
     if match is None:
         return set()

@@ -15,6 +15,11 @@ system prompt, while a false positive would make the bot refuse something nobody
 asked for. ``tests/data/guard_cases.json`` holds the positive and negative cases
 every change must keep passing.
 
+Two related helpers live here too: ``detect_debate_request`` spots someone
+inviting the bot to a debate (and whether they want it in voice, which it can
+only offer over text), and ``looks_like_agreement`` checks a drafted reply for
+"omw" or "sent" style answers to a request the bot can't fulfil.
+
 Input is capped at ``MAX_SCAN_CHARS`` so matching time stays bounded no matter
 what someone pastes into the chat.
 """
@@ -22,7 +27,7 @@ what someone pastes into the chat.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 MAX_SCAN_CHARS = 1000
@@ -46,8 +51,14 @@ class Category:
 
 # ---------------------------------------------------------------- fragments
 
-# Words and mentions people put before a request: "yo", "bro", "pls", "@bob".
-_FILLER = r"(?:yo|bro|bruh|ok|okay|lol|lmao|pls|please|just|so|and|hey|now|anyways?|<@!?\d+>|@\S+)"
+# Words people put before a request: "yo", "bro", "pls".
+_FILLER_WORD = (
+    r"(?:yo+|ayo|oi|bro|bruh|ok|okay|lol|lmao|pls|plz|please|just|so|and|hey+|now|anyways?)"
+)
+# Filler words, plus mentions that include the bot: its name (rewritten to
+# "@bot" by _normalize_names), @everyone, @here, or a raw "<@id>" whose owner
+# is unknown. "@bob" is not filler: a message led by it is meant for bob.
+_FILLER = r"(?:" + _FILLER_WORD + r"|<@!?\d+>|@bot\b|@everyone\b|@here\b)"
 # Start of the message or of a sentence, plus any filler (imperatives: "hop in vc").
 _CLAUSE_START = r"(?:^|\n|[.?!;]\s+)\W*(?:" + _FILLER + r"[\s,.!:]+)*"
 # Ways to say "you".
@@ -126,15 +137,40 @@ _INVITED = (
 )
 # "you down for ...", "anyone up for ...".
 _DOWN_FOR = r"\b(?:you|u|ya|any(?:one|body|1))\s+(?:down|up)\s+(?:for|4)\s+(?:a\s+|some\s+|the\s+)?"
+# "wanna ...", "u tryna ...", "can you ...", "let's ...": invitations that
+# include the speaker, without the "you should ..." of advice.
+_INVITE_ALONG = (
+    "(?:"
+    + _CLAUSE_START
+    + _WANNA
+    + r"\s+|\b"
+    + _YOU
+    + r"\s+"
+    + _WANNA
+    + r"\s+|"
+    + _POLITE_ASK
+    + "|"
+    + _GROUP_INVITE
+    + ")"
+    + _SOFTENERS
+)
 # What may follow a requested action: end, "with me", "rn", "later", ...
 _REQUEST_TAIL = (
     r"(?=\s*(?:$|[?.!,]|with\s+(?:me|us)\b|w\s+(?:me|us)\b|rn\b|now\b|later\b|tonight\b|tn\b|tmrw\b|tomorrow\b|"
-    r"sometime\b|rq\b|again\b|or\b|pls\b|bro\b|lol\b|then\b|soon\b))"
+    r"sometime\b|rq\b|again\b|or\b|pls\b|bro\b|lol\b|then\b|soon\b|@bot\b))"
 )
-# Optional time words, then the end of the sentence.
+# Optional time words (or the bot's name), then the end of the sentence.
 _REQUEST_END = (
-    r"(?:\s+(?:rn|now|later|tonight|tn|tmrw|tomorrow|with\s+(?:me|us)|pls|please|bro|rq|then|again|or\s+nah|or\s+what))*"
+    r"(?:[\s,]+(?:rn|now|later|tonight|tn|tmrw|tomorrow|with\s+(?:me|us)|pls|plz|please|bro|rq|then|again|or\s+nah|or\s+what|@bot\b))*"
     r"\s*(?=[?.!]|\n|$)"
+)
+# "you joining vc?", "r u coming": asking whether the bot is on its way.
+_YOU_COMING = (
+    r"(?:"
+    + _CLAUSE_START
+    + r"(?:(?:are|r)\s+)?|\b(?:are|r)\s+)"
+    + _YOU
+    + r"\s+(?:still\s+|even\s+|ever\s+)?(?:joining|coming|hopping|jumping|getting|popping)(?:\s+(?:back\s+)?(?:in|on|into|to))?\s+"
 )
 # Platforms people ask for handles on.
 _SOCIALS = (
@@ -148,8 +184,14 @@ _GAMES = (
     r"terraria|stardew|lethal\s+company|phasmo(?:phobia)?|dbd|skribbl|gartic(?:\s+phone)?|2k\d*|fifa|madden|halo|"
     r"destiny|tf2|deadlock|marvel\s+rivals|rivals|palworld|valheim|the\s+finals|geoguessr|genshin|osu|"
     r"chess(?:\.com|\s+online)|lichess|pokemon|brawl\s*stars|clash\s+royale|bedwars|hypixel|elden\s+ring|"
-    r"sea\s+of\s+thieves|ranked|comp|duos|squads|1v1s?|some\s+(?:games|rounds)|online|"
+    r"sea\s+of\s+thieves|ranked|comp|duos|squads|1v1s?|some\s+(?:games|rounds)(?!\s+of\b)|online|"
     r"on\s+(?:pc|xbox|ps[45]|playstation|switch|steam))"
+)
+# "play", "queue up", "duo", then "some", "a few rounds of", ... before a game.
+_GAME_PREFIX = r"(?:(?:some|a\s+(?:game|round)\s+of|a\s+few\s+(?:games|rounds)\s+of|the|a)\s+)?"
+_PLAY_VERB = (
+    r"(?:play|hop\s+on|get\s+on|jump\s+on|boot\s+up|queue(?:\s+up)?|q\s+up|grind|duo)\s+"
+    + _GAME_PREFIX
 )
 # Things a text bot can't send.
 _MEDIA = (
@@ -178,7 +220,37 @@ _JOIN_VERB = (
     r"(?:\s+(?:us|me|them)(?:\s+(?:in|on))?)?\s+"
 )
 # Voice channels and calls (not "call of duty").
-_VOICE_NOUN = r"(?:the\s+|a\s+|my\s+|our\s+|this\s+|general\s+)?(?:discord\s+)?(?:vc|voice\s*(?:chat|channel|call)|call(?!\s+of\b)|stage)\b"
+_VOICE_NOUN = (
+    r"(?:(?:the\s+|a\s+|my\s+|our\s+|this\s+|general\s+)?(?:discord\s+)?(?:vc|voice\s*(?:chat|channel|call)|call(?!\s+of\b)|stage)\b"
+    # Bare "voice" only at the end of the ask ("hop in voice"), not "a voice like".
+    r"|voice(?=\s*(?:$|[?.!,\n]|rn\b|now\b|later\b|tonight\b|tn\b|with\b|pls\b|bro\b|lol\b|or\b|then\b|@bot\b)))"
+)
+# Places people invite each other to: "wanna go to the gym", "lets go to mcdonalds".
+_RESTAURANTS = (
+    r"(?:mcdonalds|mcdonald's|mcd'?s|maccas|starbucks|chipotle|wendy'?s|taco\s+bell|kfc|chick[\s-]?fil[\s-]?a|five\s+guys|"
+    r"in-?n-?out|subway|popeyes|panda(?:\s+express)?|dominos|pizza\s+hut|dunkin)"
+)
+_PLACES = (
+    r"(?:(?:the|a)\s+)?(?:gym|mall|movies|cinema|theater|theatre|park|beach|store|shops?|concert|club|party|arcade|"
+    r"bowling(?:\s+alley)?|skate\s*park|lake|pool|library|cafe|"
+    + _RESTAURANTS
+    + r"|my\s+(?:place|house|crib))(?!\w)"
+)
+# Things people go out to eat or drink together.
+_FOODS = (
+    r"(?:food|lunch|dinner|breakfast|coffee|boba|drinks?|a\s+drink|a\s+bite|ice\s+cream|pizza|tacos|burgers?|wings|"
+    + _RESTAURANTS
+    + r")(?!\w)"
+)
+# "[image: cat.png]": attachment hints added by IncomingMessage.text_for_prompt.
+_ATTACHMENT = r"\[(?:image|video|audio|file):\s[^\]\n]{1,200}\]"
+# Asking for an opinion on, or a look at, something sent ("thoughts", "rate it").
+_TAKE_A_LOOK = (
+    r"\b(?:look|watch|listen|check|peep|rate|thoughts|opinions?|wdyt|what\s+do\s+(?:you|u|ya)\s+think|"
+    r"how\s+do\s+(?:you|u)\s+like|see\s+(?:this|that|it))\b"
+    # Not inside an attachment hint ("[image: look.png]").
+    r"(?![^\[\]\n]*\])"
+)
 
 
 # --------------------------------------------------------------- categories
@@ -195,6 +267,7 @@ _PATTERNS: dict[str, tuple[str, list[str]]] = {
             _ASKED_OF_BOT
             + r"call\s+(?:me|us)(?=\s*(?:$|[?.!,]|rn\b|now\b|later\b|tonight\b|tmrw\b|tomorrow\b|pls\b|when\b|back\b|sometime\b|on\s+discord\b|at\s+\d|in\s+\d|bro\b|lol\b))",
             r"\b(?:need|want|are|r)\s+(?:you|u|ya)\s+(?:in|on)\s+(?:the\s+)?(?:vc|voice\s+(?:chat|channel|call))\b|\b(?:need|want)\s+(?:you|u)\s+(?:in|on)\s+(?:the\s+)?call\b",
+            _YOU_COMING + _VOICE_NOUN,
         ],
     ),
     "video_call": (
@@ -232,17 +305,47 @@ _PATTERNS: dict[str, tuple[str, list[str]]] = {
     "play_games": (
         "play a game with them",
         [
-            "(?:"
-            + _ASKED_OR_INVITED
-            + r"(?:play|hop\s+on|get\s+on|jump\s+on|boot\s+up|queue(?:\s+up)?|q\s+up|grind|duo)\s+"
-            r"(?:(?:some|a\s+(?:game|round)\s+of|a\s+few\s+(?:games|rounds)\s+of|the|a)\s+)?|"
+            # "wanna play val", "lets play fortnite": an invitation, not advice
+            # ("you should play elden ring") or a question ("do you play val").
+            "(?:(?:"
+            + _CLAUSE_START
+            + _WANNA
+            + r"\s+|\b"
+            + _YOU
+            + r"\s+"
+            + _WANNA
+            + r"\s+|"
+            + _GROUP_INVITE
+            + ")"
+            + _SOFTENERS
+            + _PLAY_VERB
+            + "|"
             + _DOWN_FOR
             + ")"
             + _GAMES
             + r"(?!\w)",
-            r"\b(?:do|d|you|u|ya)\s+(?:you\s+|u\s+)?(?:even\s+|ever\s+|still\s+)?play\s+"
+            # "hop on fortnite", "can you queue ranked": joining in, even unprompted.
+            "(?:"
+            + _CLAUSE_START
+            + "|"
+            + _POLITE_ASK
+            + "|"
+            + _WANT_YOU_TO
+            + ")"
+            + _SOFTENERS
+            + r"(?:hop\s+on|get\s+on|jump\s+on|boot\s+up|queue(?:\s+up)?|q\s+up)\s+"
+            + _GAME_PREFIX
             + _GAMES
             + r"(?!\w)",
+            # "can you play chess online with me", "play val w us".
+            _ASKED_OR_INVITED
+            + _PLAY_VERB
+            + _GAMES
+            + r"(?:\s+[\w']+){0,2}?\s+(?:with|w)\s+(?:me|us)\b",
+            # "wanna play with me".
+            _ASKED_OR_INVITED
+            + r"play(?:\s+(?:something|sometime|later|rn|tonight|online|together))?\s+(?:with|w)\s+(?:me|us)\b"
+            + _REQUEST_END,
             _INVITED + r"(?:duo|trio|squad\s+up|queue\s+up|q\s+up)" + _REQUEST_TAIL,
             _CLAUSE_START + r"(?:duo|trio|q\s+up|queue\s+up)(?:\s+(?:ranked|comp))?" + _REQUEST_END,
             _ASKED_OF_BOT
@@ -319,13 +422,30 @@ _PATTERNS: dict[str, tuple[str, list[str]]] = {
             r"\b(?:meet|see|hang(?:\s+out)?(?:\s+with)?|chill(?:\s+with)?|link(?:\s+up)?(?:\s+with)?|hug|visit)\s+(?:you|u|ya|me|us|each\s+other)\s+(?:sometime\s+)?(?:irl|in\s+person|in\s+real\s+life|face\s+to\s+face)\b",
             _INVITED
             + r"(?:meet|hang(?:\s+out)?|chill|link|kick\s+it)\s+(?:sometime\s+)?(?:irl|in\s+person|in\s+real\s+life)\b",
+            # "wanna hang out", "can we hang out sometime" (not "hang out in chat").
+            _INVITE_ALONG
+            + r"hang(?:\s+out)?(?:\s+(?:sometime|together|later|tmrw|tomorrow|tonight|this\s+weekend|again|soon|rn|fr))*"
+            r"(?=\s*(?:$|[?.!,\n]|with\s+(?:me|us)\b|w\s+(?:me|us)\b|or\b|bro\b|lol\b|pls\b|@bot\b))",
+            # "wanna go to the gym together", "lets go get mcdonalds".
+            _INVITE_ALONG
+            + r"(?:(?:go|head|come|walk|drive|roll)\s+(?:(?:out|over)\s+)?(?:to\s+)?"
+            + _PLACES
+            + r"|(?:go\s+(?:and\s+)?)?(?:get|grab|eat|have)\s+(?:some\s+)?"
+            + _FOODS
+            + ")",
+            # "come watch a movie with me", "wanna go see a movie".
+            "(?:"
+            + _CLAUSE_START
+            + r"(?:just\s+)?come|"
+            + _INVITE_ALONG
+            + r"(?:come|go))\s+(?:and\s+|n\s+)?(?:watch|see|catch)\s+(?:(?:a|the|some)\s+)?(?:[\w']+\s+)?(?:movies?|films?|shows?|game|match|concert)\b",
         ],
     ),
     "open_links": (
-        "open a link or look at, watch or listen to something they sent",
+        "look at or open something they sent, like a link, pic or video",
         [
             _ASKED_OF_BOT
-            + r"(?:watch|listen\s+to|check\s+out|look\s+at|open|click(?:\s+on)?|peep|rate|see)\s+(?:(?:this|that|my|these|those)\s+(?:[\w']+\s+){0,2}?"
+            + r"(?:watch|listen\s+to|check\s+out|look\s+at|open|click(?:\s+on)?|peep|see)\s+(?:(?:this|that|my|these|those)\s+(?:[\w']+\s+){0,2}?"
             + _LINKABLE
             + r"|the\s+(?:link|url|attachment|file|vid|video|clip|pic|pics|image|ss|screenshot|gif|tiktok)\b|the\s+(?:[\w']+\s+){0,2}?"
             + _LINKABLE
@@ -336,9 +456,13 @@ _PATTERNS: dict[str, tuple[str, list[str]]] = {
             + r"|the\s+(?:[\w']+\s+){0,2}?"
             + _LINKABLE
             + r"\s+(?:i|he|she|they)\s+(?:just\s+)?(?:sent|posted|linked|made)\b)",
-            r"\b(?:watch|listen|check|look|open|click|peep|thoughts|rate|see|opinion)\b[^\n]{0,60}https?://\S+|https?://\S+[^\n]{0,80}\b(?:watch|listen|check\s+(?:it|this)\s+out|thoughts|what\s+do\s+(?:you|u)\s+think|rate|opinion)\b",
-            r"\b(?:what\s+do\s+(?:you|u)\s+think|thoughts|opinions?|rate|how\s+do\s+(?:you|u)\s+like)\s+(?:(?:of|on|about)\s+)?(?:this|my)\s+(?:[\w']+\s+)?"
-            r"(?:pics?|pfp|photo|picture|video|vid|clip|song|track|beat|drawing|art|fit|outfit|setup|edit|tiktok|meme|banner|image|ss|screenshot)\b",
+            # A link plus an ask to look at it or rate it, in either order.
+            r"(?:\b(?:watch|listen|check|look|open|click|peep|thoughts|rate|see|opinion|wdyt)\b|\bwhat\s+do\s+(?:you|u|ya)\s+think\b|\bhow\s+do\s+(?:you|u)\s+like\b)[^\n]{0,60}https?://\S+"
+            r"|https?://\S+[^\n]{0,80}\b(?:watch|listen|check\s+(?:it|this)\s+out|thoughts|what\s+do\s+(?:you|u|ya)\s+think|wdyt|rate|opinion)\b",
+            # An attachment plus an ask to look at it, in either order, or plus a
+            # question in the same message ("[image: x.png] is this good?").
+            r"^(?=[\s\S]*?" + _ATTACHMENT + r")[\s\S]*?" + _TAKE_A_LOOK,
+            _ATTACHMENT + r"[^\n]*?\?|\?[^\n]*?" + _ATTACHMENT,
         ],
     ),
     "reminders": (
@@ -398,16 +522,217 @@ def detect_impossible_request(text: str, *, names: Iterable[str] = ()) -> Imposs
 
     Args:
         text: The message (or several messages joined with newlines).
-        names: Names the bot answers to. They are rewritten to the "@name" form
-            Discord uses for a real mention, which the patterns already treat as
-            a lead-in, so "yo mp3 hop in vc" reads like "yo @mp3 hop in vc".
+        names: Names the bot answers to. They (and "@name" mentions of them) are
+            rewritten to "@bot", which the patterns treat as a lead-in, so
+            "yo mp3 hop in vc" reads like "yo @bot hop in vc". Lines led by an
+            @mention of anyone else are skipped: they're meant for that person.
     """
-    text = text.replace("\u2019", "'")[:MAX_SCAN_CHARS]
-    text = _normalize_names(text, names)
+    text = _prepare(text, names)
     for category in CATEGORIES:
         if any(pattern.search(text) for pattern in category.patterns):
             return ImpossibleRequest(category.key, category.label)
     return None
+
+
+# ----------------------------------------------------------------- debates
+
+
+@dataclass(frozen=True, slots=True)
+class DebateRequest:
+    """Someone inviting the bot to a debate."""
+
+    voice: bool
+    """True when they want it in a voice channel or call, which the bot can't do."""
+
+
+# "a quick debate", "a vc debate", "debate".
+_DEBATE_NOUN = (
+    r"(?:(?:a|an|some|another)\s+)?(?:(?:quick|real|lil|little|friendly|fun|proper|serious|text|vc|voice|1v1|"
+    r"philosophy|philosophical)\s+)?debate\b"
+)
+# What may follow a voice debate ask: end, "me", "rn", a topic ("on free will").
+_DEBATE_TAIL = (
+    r"(?=\s*(?:$|[?.!,\n]|me\b|us\b|rn\b|now\b|later\b|tonight\b|on\b|about\b|over\b|with\b|sometime\b|or\b|"
+    r"pls\b|bro\b|lol\b|then\b|@bot\b))"
+)
+_VOICE_DEBATE_PATTERNS = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # "vc debate?", "wanna voice debate".
+        _ASKED_OR_INVITED + r"(?:(?:a|an)\s+)?(?:vc|voice|call)\s+debate\b" + _DEBATE_TAIL,
+        # "debate me in vc", "lets debate on call".
+        _ASKED_OR_INVITED
+        + r"debate\s+(?:(?:me|us)\s+)?(?:in|on|over)\s+(?:(?:the|a)\s+)?(?:vc|voice|call)\b(?!\s+(?:was|is|were|went|got)\b)",
+        # "hop in vc and debate".
+        _ASKED_OR_INVITED
+        + r"(?:hop|join|get|jump|come)\s+(?:(?:in|on|into)\s+)?(?:(?:the|a)\s+)?(?:vc|voice|call)\s+(?:and|n|&|to)\s+debate\b",
+    )
+)
+_DEBATE_PATTERNS = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        # "debate me", "mp3 debate me on free will", "fine then, debate me".
+        "(?:"
+        + _CLAUSE_START
+        + r"|\b(?:then|fine|alright|aight|ight|smart|so|ok|okay)[\s,]+)"
+        + _SOFTENERS
+        + r"debate\s+(?:me|us)\b",
+        # "wanna debate", "u down to debate", "lets debate", "down for a debate".
+        "(?:"
+        + _CLAUSE_START
+        + _WANNA
+        + r"\s+|\b"
+        + _YOU
+        + r"\s+"
+        + _WANNA
+        + r"\s+|"
+        + _POLITE_ASK
+        + "|"
+        + _GROUP_INVITE
+        + "|"
+        + _WANT_YOU_TO
+        + "|"
+        + _CLAUSE_START
+        + r"(?:down|up)\s+(?:for|4)\s+|"
+        + _DOWN_FOR
+        + ")"
+        + _SOFTENERS
+        + r"(?:(?:have|do|start)\s+)?"
+        + _DEBATE_NOUN,
+        # "i'll debate you", "i bet i could outdebate u".
+        r"\b(?:i'?ll|ill|i'?d|i\s+(?:will|would|could|can|wanna|want\s+to|bet\s+i\s+(?:could|can|would|will|'?d|'?ll)))\s+"
+        r"(?:(?:easily|totally|def|definitely|so|fr|honestly|still|literally|happily|gladly)\s+)?(?:debate|out-?debate)\s+(?:(?:with|against)\s+)?(?:you|u|ya)\b",
+        # "i challenge you to a debate", "i'd beat you in a debate", "win a debate against you".
+        r"\bchallenge\s+(?:you|u|ya)\s+to\s+(?:a\s+)?(?:\w+\s+)?debate\b"
+        r"|\b(?:beat|destroy|smoke|cook|body|wreck|clap|own|win\s+against)\s+(?:you|u|ya)\s+in\s+(?:a|any|the|this)\s+debate\b"
+        r"|\bwin\s+(?:a|any|the|this)\s+debate\s+(?:against|vs\.?|with)\s+(?:you|u|ya)\b",
+        # "1v1 debate", "1v1 me in a debate".
+        r"\b1v1\s+(?:me\s+)?(?:in\s+(?:a\s+)?)?debate\b|\bdebate\s+1v1\b",
+    )
+)
+# Hints that a debate request is meant for voice: "in vc", "on call", "voice".
+_VOICE_HINT_RE = re.compile(
+    r"\b(?:vc|voice(?!\s+(?:your|ur|my|his|her|their|our|an?|the|of)\b)|(?:on|in|over|a|the|discord)\s+call|mic)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_debate_request(text: str, *, names: Sequence[str] = ()) -> DebateRequest | None:
+    """Return the debate ``text`` invites the bot to, if any.
+
+    "debate me", "wanna debate", "lets debate whether cereal is soup" and
+    "i bet i could win a debate against you" are invitations; "the debate last
+    night was wild" and "we debated this in class" are not. ``voice`` is set
+    when they want to debate in a voice channel or call ("vc debate?", "debate
+    me in vc"), which the bot can only offer to do over text instead.
+
+    Args:
+        text: The message (or several messages joined with newlines).
+        names: Names the bot answers to, handled as in
+            :func:`detect_impossible_request`.
+    """
+    text = _prepare(text, names)
+    if any(pattern.search(text) for pattern in _VOICE_DEBATE_PATTERNS):
+        return DebateRequest(voice=True)
+    if any(pattern.search(text) for pattern in _DEBATE_PATTERNS):
+        return DebateRequest(voice=_VOICE_HINT_RE.search(text) is not None)
+    return None
+
+
+# --------------------------------------------------------------- agreements
+
+# Words that turn "joining" into "not joining".
+_NEGATOR_RE = re.compile(
+    r"\b(?:not|never|no|nah|nope|can'?t|cannot|won'?t|wont|don'?t|dont|ain'?t|aint|isn'?t|wasn'?t|wouldn'?t|"
+    r"couldn'?t|stop)\b",
+    re.IGNORECASE,
+)
+# What may follow "joining" / "hopping on" when it means "i'm on my way".
+_ON_MY_WAY_TAIL = (
+    r"(?=\s*(?:$|[.!,?]|now\b|rn\b|in\b|on\b|you\b|u\b|ya\b|vc\b|call\b|the\s+(?:vc|call)\b|lol\b|bro\b|fr\b|asap\b|"
+    r"real\s+quick\b|rq\b|one\s+sec\b|1\s+sec\b|gimme\b))"
+)
+# Saying yes to, or pretending to do, the request.
+_AGREEMENT_RE = re.compile(
+    r"\b(?:omw|otw|on\s+(?:my|the)\s+way|be\s+(?:right\s+)?there|pulling\s+up"
+    r"|(?:joining|hopping\s+(?:on|in)|jumping\s+(?:on|in)|coming\s+(?:now|rn|over))"
+    + _ON_MY_WAY_TAIL
+    + r"|"
+    r"(?:i'?ll|ill|i\s+will|lemme|let\s+me|gonna|imma|ima)\s+(?:[\w']+\s+)?(?:join|hop|jump|come|call|send|add|text|dm|facetime|ft|"
+    r"stream|play|pull\s+up|accept|check|look|watch|listen|remind|ping|react|meet)\b|"
+    r"i'?m\s+(?:in|down|joining|coming|there|on\s+it)(?=\s*(?:$|[.!,?]|lol\b|fr\b|bro\b|rn\b|now\b))|"
+    r"sending(?:\s+(?:it|now|rn|one|you|u|ya|that|them))?\b|just\s+sent|sent\s+(?:it|you|u|ya|one|that|them)\b|"
+    r"added\s+(?:you|u|ya)\b|accepted\s+(?:it|your|ur|the)\b|let'?s\s+do\s+it|say\s+less)",
+    re.IGNORECASE,
+)
+# Putting it off, which still promises to do it.
+_DEFERRAL_RE = re.compile(
+    r"(?<!not\s)\b(?:maybe\s+(?:later|tmrw|tomorrow|tonight)|next\s+time|another\s+time|some\s+other\s+time|"
+    r"later\s+tho(?:ugh)?|(?:give|gimme|give\s+me)\s+(?:a\s+|one\s+)?(?:sec|second|min|minute|moment)|one\s+sec|"
+    r"1\s+sec|brb|in\s+a\s+(?:bit|sec|min))\b",
+    re.IGNORECASE,
+)
+# A bare yes that is the whole reply: "sure", "bet", "sent", "done".
+_BARE_YES_RE = re.compile(
+    r"^\W*(?:sure|bet|ok(?:ay)?|k|kk|yeah|yea|ye|yes|yep|ya|aight|ight|alright|on\s+it|coming|sent|done|added|"
+    r"joined|joining|accepted)(?:\s+(?:bro|man|dude|lol|fr|then))?\W*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_agreement(reply: str) -> bool:
+    """True when ``reply`` agrees to, or pretends to carry out, a request.
+
+    Meant for a reply to a request the bot can't fulfil (see
+    :func:`detect_impossible_request`): "omw", "joining now", "sent", "added
+    you", "sure, gimme a sec" and "maybe later" all promise something it can't
+    do, while "nah i dont do vc" and "not joining lol" turn it down. A bare
+    "ok" or "sure" counts too, so don't use this on ordinary chat.
+    """
+    reply = reply.replace("\u2019", "'")[:MAX_SCAN_CHARS]
+    if _BARE_YES_RE.match(reply) or _DEFERRAL_RE.search(reply):
+        return True
+    for match in _AGREEMENT_RE.finditer(reply):
+        clause_start = max(reply.rfind(mark, 0, match.start()) for mark in ".,!?;\n") + 1
+        if not _NEGATOR_RE.search(reply, clause_start, match.end()):
+            return True
+    return False
+
+
+# ------------------------------------------------------------------ helpers
+
+# The @mentions a line starts with, after any emoji and filler words:
+# "yo @bob, @alice: ..." (group 2 is the run of mentions).
+_LEADING_AT_MENTIONS_RE = re.compile(
+    r"^([^\w@<\n]*(?:" + _FILLER_WORD + r"[ \t,.!:]+)*)((?:@[^\s,:;@]+[ \t,:;]*)+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_AT_MENTION_RE = re.compile(r"@[^\s,:;@]+")
+_GROUP_MENTIONS = frozenset({"@bot", "@everyone", "@here"})
+
+
+def _prepare(text: str, names: Iterable[str]) -> str:
+    """Normalise ``text`` for matching and drop lines meant for someone else.
+
+    A line led by @mentions that include the bot ("@bob @mp3 hop in vc") reads
+    as led by "@bot"; one led only by other people ("yo @bob hop in vc") is
+    meant for them, so it is dropped.
+    """
+    text = text.replace("\u2019", "'")[:MAX_SCAN_CHARS]
+    text = _normalize_names(text, names)
+    if "@" not in text:
+        return text
+    lines = []
+    for line in text.split("\n"):
+        match = _LEADING_AT_MENTIONS_RE.match(line)
+        if match is not None:
+            mentions = {mention.lower() for mention in _AT_MENTION_RE.findall(match.group(2))}
+            if "@bot" in mentions:
+                line = match.group(1) + "@bot " + line[match.end() :]
+            elif not mentions & _GROUP_MENTIONS:
+                continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _normalize_names(text: str, names: Iterable[str]) -> str:
@@ -416,5 +741,5 @@ def _normalize_names(text: str, names: Iterable[str]) -> str:
     )
     if not alternatives:
         return text
-    pattern = re.compile(rf"(?<![\w@])(?:{alternatives})(?!\w)", re.IGNORECASE)
+    pattern = re.compile(rf"(?<![\w@])@?(?:{alternatives})(?!\w)", re.IGNORECASE)
     return pattern.sub("@bot", text)
