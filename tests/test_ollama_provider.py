@@ -208,3 +208,98 @@ async def test_registry_caches_and_rejects_unknown_providers() -> None:
             registry.get("nonexistent")
     finally:
         await registry.close()
+
+
+async def test_warm_up_loads_with_the_reply_context_window(
+    fake_ollama: tuple[FakeOllama, str],
+) -> None:
+    fake, url = fake_ollama
+    provider = _provider(url, keep_alive="24h")
+    try:
+        assert await provider.warm_up(options=GenerationOptions(context_window=4096))
+    finally:
+        await provider.close()
+    (load,) = fake.loads
+    assert load["messages"] == []
+    assert load["options"] == {"num_ctx": 4096}
+    assert load["keep_alive"] == "24h"
+    assert fake.requests == []
+
+
+async def test_warm_up_failure_is_not_fatal() -> None:
+    provider = _provider("http://127.0.0.1:9", max_retries=0)
+    try:
+        assert await provider.warm_up() is False
+    finally:
+        await provider.close()
+
+
+async def test_cache_and_load_metrics_are_reported(
+    fake_ollama: tuple[FakeOllama, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    fake, url = fake_ollama
+    body = {**chat_body("hi"), "prompt_eval_cached_count": 40, "load_duration": 5_000_000}
+    fake.chat_responses.append((200, body))
+    provider = _provider(url)
+    try:
+        result = await provider.chat(MESSAGES)
+        assert result.cached_prompt_tokens == 40
+        assert result.load_seconds == pytest.approx(0.005)
+
+        # A multi-second load after the first request means the model was reloaded.
+        fake.load_duration_ns = 3_000_000_000
+        await provider.chat(MESSAGES)
+    finally:
+        await provider.close()
+    assert "Ollama reloaded" in caplog.text
+
+
+async def test_thinking_is_turned_off_for_thinking_models(
+    fake_ollama: tuple[FakeOllama, str],
+) -> None:
+    fake, url = fake_ollama
+    fake.capabilities = {
+        "qwen3:8b": {"capabilities": ["completion", "thinking"]},
+        "gpt-oss:20b": {
+            "capabilities": ["completion", "thinking"],
+            "thinking": {"values": ["low", "medium", "high"], "default": "medium"},
+        },
+    }
+    provider = _provider(url)
+    try:
+        await provider.chat(MESSAGES, model="qwen3:8b")
+        await provider.chat(MESSAGES, model="qwen3:8b")
+        await provider.chat(MESSAGES, model="gpt-oss:20b")
+        await provider.chat(MESSAGES, model="llama3.1:8b")
+    finally:
+        await provider.close()
+
+    assert [r.get("think") for r in fake.requests] == [False, False, "low", None]
+    assert fake.shows == ["qwen3:8b", "gpt-oss:20b", "llama3.1:8b"]  # asked once per model
+
+
+async def test_configured_think_flag_wins(fake_ollama: tuple[FakeOllama, str]) -> None:
+    fake, url = fake_ollama
+    fake.capabilities = {"qwen3:8b": {"capabilities": ["completion", "thinking"]}}
+    provider = _provider(url, think=True)
+    try:
+        await provider.chat(MESSAGES, model="qwen3:8b")
+    finally:
+        await provider.close()
+    assert fake.requests[0]["think"] is True
+    assert fake.shows == []
+
+
+async def test_health_check_reports_the_server_version(
+    fake_ollama: tuple[FakeOllama, str],
+) -> None:
+    fake, url = fake_ollama
+    provider = _provider(url)
+    try:
+        health = await provider.health_check("llama3.1:8b")
+        fake.version = None
+        without = await provider.health_check("llama3.1:8b")
+    finally:
+        await provider.close()
+    assert health.detail.startswith("Ollama 0.35.1: ")
+    assert without.detail == "model 'llama3.1:8b' is installed"

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+from arcane.bot import transport as transport_module
 from arcane.bot.adapters import channel_info, is_conversational, to_incoming
 from arcane.bot.bot import ArcaneBot, default_intents
 from arcane.bot.events import EventRouter
@@ -95,6 +95,37 @@ def test_mentions_are_read_from_content() -> None:
     incoming = to_incoming(_message("@mp3 and @bob", raw_mentions=[BOT_ID, 2]), BOT_ID)
     assert incoming.mentions_bot
     assert incoming.mentioned_user_ids == frozenset({2})
+
+
+@pytest.mark.parametrize(
+    ("content", "mentions", "addressed"),
+    [
+        ("<@2> what do you think", [2], {2}),
+        ("<@!2>, <@3>: thoughts?", [2, 3], {2, 3}),
+        ("i told <@2> about it", [2], set()),
+        (f"<@{BOT_ID}> <@2> settle this", [BOT_ID, 2], {2}),
+        ("no mentions here", [], set()),
+        ("yo <@2> hop in vc", [2], {2}),
+        ("hey <@2> you coming tonight?", [2], {2}),
+        ("ok <@2> your turn", [2], {2}),
+        ("bro <@2> what", [2], {2}),
+        ("Lol, <@2> <@3> look", [2, 3], {2, 3}),
+        ("\N{SKULL} <@2> what was that", [2], {2}),
+        ("<:skull:123> <@2> what was that", [2], {2}),
+        ("wait so <@2> did it", [2], {2}),
+        ("...<@2>?", [2], {2}),
+        (f"yo <@{BOT_ID}> hop in vc", [BOT_ID], set()),
+        ("you <@2> are wrong", [2], set()),
+        ("sorry <@2>", [2], set()),
+        ("yo i told <@2>", [2], set()),
+    ],
+)
+def test_addressed_users_are_leading_mentions_only(
+    content: str, mentions: list[int], addressed: set[int]
+) -> None:
+    incoming = to_incoming(_message(content, raw_mentions=mentions), BOT_ID)
+    assert incoming.addressed_user_ids == frozenset(addressed)
+    assert BOT_ID not in incoming.mentioned_user_ids
 
 
 def test_bot_role_mention_counts_as_mention() -> None:
@@ -222,14 +253,10 @@ async def test_send_errors_become_transport_errors() -> None:
 async def test_typing_failures_do_not_block() -> None:
     channel = _sendable_channel()
 
-    class BrokenTyping:
-        async def __aenter__(self) -> None:
-            raise discord.HTTPException(MagicMock(status=500, reason="err"), "boom")
+    async def broken_typing() -> None:
+        raise discord.HTTPException(MagicMock(status=500, reason="err"), "boom")
 
-        async def __aexit__(self, *_exc: object) -> None:
-            return None
-
-    channel.typing = BrokenTyping
+    channel.typing = broken_typing
     transport = DiscordTransport(_client_with(channel))
     entered = False
     async with transport.typing(10):
@@ -237,20 +264,38 @@ async def test_typing_failures_do_not_block() -> None:
     assert entered
 
 
-async def test_typing_wraps_channel_typing() -> None:
+async def test_typing_pings_until_the_context_closes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(transport_module, "TYPING_REFRESH_SECONDS", 0.01)
     channel = _sendable_channel()
-    events: list[str] = []
+    pings: list[float] = []
 
-    @asynccontextmanager
-    async def typing() -> AsyncIterator[None]:
-        events.append("on")
-        yield
-        events.append("off")
+    async def typing() -> None:
+        pings.append(asyncio.get_running_loop().time())
 
     channel.typing = typing
     async with DiscordTransport(_client_with(channel)).typing(10):
-        events.append("body")
-    assert events == ["on", "body", "off"]
+        await asyncio.sleep(0.05)
+    count = len(pings)
+    assert count >= 2  # refreshed while open
+    await asyncio.sleep(0.05)
+    assert len(pings) == count  # and never again once closed
+
+
+async def test_typing_never_runs_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(transport_module, "TYPING_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(transport_module, "MAX_TYPING_SECONDS", 0.05)
+    channel = _sendable_channel()
+    pings: list[float] = []
+
+    async def typing() -> None:
+        pings.append(asyncio.get_running_loop().time())
+
+    channel.typing = typing
+    async with DiscordTransport(_client_with(channel)).typing(10):
+        await asyncio.sleep(0.15)  # something inside hangs far past the cap
+        count = len(pings)
+        await asyncio.sleep(0.05)
+        assert len(pings) == count  # the indicator stopped at the cap
 
 
 # -------------------------------------------------------------------------- router

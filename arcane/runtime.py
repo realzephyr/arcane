@@ -72,7 +72,12 @@ def build_conversation_handler(
     model_name = model or personality.model.model
     long_term_on = settings.long_term_memory_enabled and personality.memory.long_term_enabled
     extractor: MemoryExtractor = (
-        LLMMemoryExtractor(provider, bot_name=personality.name, model=model_name)
+        LLMMemoryExtractor(
+            provider,
+            bot_name=personality.name,
+            model=model_name,
+            context_window=personality.model.context_window,
+        )
         if long_term_on
         else NullMemoryExtractor()
     )

@@ -76,6 +76,7 @@ class ConversationRecord:
     bot_turns: int = 0
     user_turns: int = 0
     awaiting_reply_since: datetime | None = None
+    awaiting_reply_from: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

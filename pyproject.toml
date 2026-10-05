@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arcane"
-version = "0.1.0"
+version = "0.2.0"
 description = "A scalable framework for AI-powered conversational Discord bots with persistent personalities and memory."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,6 +68,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+# Regex tables: splitting long patterns across lines makes them harder to audit.
+"arcane/ai/guards.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["arcane"]

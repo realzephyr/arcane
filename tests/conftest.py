@@ -27,6 +27,8 @@ async def fake_ollama() -> AsyncIterator[tuple[FakeOllama, str]]:
     app = web.Application()
     app.router.add_post("/api/chat", fake.chat)
     app.router.add_get("/api/tags", fake.tags)
+    app.router.add_post("/api/show", fake.show)
+    app.router.add_get("/api/version", fake.version_info)
     server = TestServer(app)
     await server.start_server()
     try:

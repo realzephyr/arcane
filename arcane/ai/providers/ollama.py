@@ -7,7 +7,11 @@ concurrency:
 * a semaphore bounds in-flight requests, because Ollama typically serves one
   request at a time and queued requests would otherwise time out;
 * transient failures (connection errors, timeouts, 5xx) are retried with
-  exponential backoff and jitter; client errors are not.
+  exponential backoff and jitter; client errors are not;
+* models with a thinking mode (qwen3, deepseek-r1, ...) think before every
+  answer unless told not to, which makes a chat bot slow. Unless ``think`` is
+  configured, the provider asks Ollama once per model (``/api/show``) and turns
+  thinking off, or down to "low" for models that can't switch it off.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from arcane.config.settings import OllamaSettings
 logger = logging.getLogger(__name__)
 
 _MAX_BACKOFF_SECONDS = 8.0
+RELOAD_WARNING_SECONDS = 1.0
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -67,6 +72,8 @@ class OllamaProvider(LLMProvider):
         self._session = session
         self._owns_session = session is None
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
+        self._served_requests = 0
+        self._think: dict[str, bool | str | None] = {}
 
     @property
     def default_model(self) -> str:
@@ -97,8 +104,9 @@ class OllamaProvider(LLMProvider):
             payload["options"] = ollama_options
         if options.json_mode:
             payload["format"] = "json"
-        if self._settings.think is not None:
-            payload["think"] = self._settings.think
+        think = await self._think_value(model_name)
+        if think is not None:
+            payload["think"] = think
 
         started = time.monotonic()
         data = await self._request_with_retries("POST", "/api/chat", payload)
@@ -115,15 +123,70 @@ class OllamaProvider(LLMProvider):
             prompt_tokens=_optional_int(data.get("prompt_eval_count")),
             completion_tokens=_optional_int(data.get("eval_count")),
             duration_seconds=elapsed,
+            cached_prompt_tokens=_optional_int(data.get("prompt_eval_cached_count")),
+            load_seconds=_nanoseconds(data.get("load_duration")),
         )
         logger.debug(
-            "Ollama generation: model=%s prompt_tokens=%s completion_tokens=%s %.2fs",
+            "Ollama generation: model=%s prompt_tokens=%s cached=%s completion_tokens=%s "
+            "load=%.2fs prompt_eval=%.2fs total=%.2fs",
             result.model,
             result.prompt_tokens,
+            result.cached_prompt_tokens,
             result.completion_tokens,
+            result.load_seconds or 0.0,
+            _nanoseconds(data.get("prompt_eval_duration")) or 0.0,
             elapsed,
         )
+        if (
+            self._served_requests > 0
+            and result.load_seconds is not None
+            and result.load_seconds > RELOAD_WARNING_SECONDS
+        ):
+            logger.warning(
+                "Ollama reloaded %s (%.1fs). Keep num_ctx identical for every request to a "
+                "model and keep_alive long, or each reload costs a full model load.",
+                result.model,
+                result.load_seconds,
+            )
+        self._served_requests += 1
         return result
+
+    async def warm_up(
+        self,
+        *,
+        model: str | None = None,
+        options: GenerationOptions | None = None,
+    ) -> bool:
+        """Load the model by sending a chat request with no messages.
+
+        The load-time options (``num_ctx``) are sent too, so the first real
+        request finds the model loaded exactly as it needs it.
+        """
+        payload: dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": [],
+            "keep_alive": self._settings.keep_alive,
+        }
+        ollama_options = self._build_options(options or GenerationOptions())
+        if ollama_options:
+            payload["options"] = ollama_options
+        started = time.monotonic()
+        try:
+            await self._request_with_retries("POST", "/api/chat", payload)
+        except ProviderError as exc:
+            logger.warning("Could not preload %s: %s", payload["model"], exc)
+            return False
+        logger.info("Loaded %s in %.1fs", payload["model"], time.monotonic() - started)
+        return True
+
+    async def version(self) -> str | None:
+        """The Ollama server version, or ``None`` if it can't be read."""
+        try:
+            data = await self._request("GET", "/api/version", None)
+        except ProviderError:
+            return None
+        version = data.get("version")
+        return str(version) if version else None
 
     async def list_models(self) -> tuple[str, ...]:
         """Names of the models installed on the Ollama server."""
@@ -144,9 +207,11 @@ class OllamaProvider(LLMProvider):
         except ProviderError as exc:
             return ProviderHealth(available=False, detail=str(exc))
 
+        version = await self.version()
+        server = f"Ollama {version}: " if version else ""
         if model is None:
             return ProviderHealth(
-                available=True, detail=f"{len(models)} model(s) installed", models=models
+                available=True, detail=f"{server}{len(models)} model(s) installed", models=models
             )
         installed = {normalize_model_name(name) for name in models}
         model_available = normalize_model_name(model) in installed
@@ -156,7 +221,7 @@ class OllamaProvider(LLMProvider):
             else f"model '{model}' is not installed; run: ollama pull {model}"
         )
         return ProviderHealth(
-            available=True, detail=detail, model_available=model_available, models=models
+            available=True, detail=server + detail, model_available=model_available, models=models
         )
 
     async def close(self) -> None:
@@ -166,6 +231,35 @@ class OllamaProvider(LLMProvider):
             self._session = None
 
     # ---------------------------------------------------------------- internals
+
+    async def _think_value(self, model: str) -> bool | str | None:
+        """The ``think`` field for ``model``: configured, or chosen from its capabilities."""
+        if self._settings.think is not None:
+            return self._settings.think
+        if model in self._think:
+            return self._think[model]
+        value: bool | str | None = None
+        try:
+            data = await self._request("POST", "/api/show", {"model": model})
+        except ProviderError as exc:
+            logger.debug("Could not read the capabilities of %s: %s", model, exc)
+            data = {}
+        capabilities = data.get("capabilities")
+        if isinstance(capabilities, list) and "thinking" in capabilities:
+            thinking = data.get("thinking")
+            values = thinking.get("values") if isinstance(thinking, dict) else None
+            if isinstance(values, list) and values and False not in values:
+                value = "low" if "low" in values else None
+            else:
+                value = False
+            logger.info(
+                "%s has a thinking mode; %s for faster replies (set ARCANE_OLLAMA_THINK to "
+                "override)",
+                model,
+                f"using think={value!r}" if value else "turning it off",
+            )
+        self._think[model] = value
+        return value
 
     @staticmethod
     def _build_options(options: GenerationOptions) -> dict[str, Any]:
@@ -266,3 +360,8 @@ class OllamaProvider(LLMProvider):
 
 def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _nanoseconds(value: Any) -> float | None:
+    """Ollama reports durations in nanoseconds."""
+    return value / 1e9 if isinstance(value, int | float) else None

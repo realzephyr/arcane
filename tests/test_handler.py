@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import random
 from collections.abc import AsyncIterator
@@ -13,16 +14,17 @@ import pytest
 
 from arcane.ai.providers.base import LLMProvider, ProviderUnavailableError
 from arcane.config.settings import Settings
+from arcane.conversation import handler as handler_module
 from arcane.conversation.decision import Decision, Reason
 from arcane.conversation.handler import ConversationHandler
 from arcane.core.clock import utcnow
-from arcane.core.models import ChannelInfo
+from arcane.core.models import ChannelInfo, ReplyReference
 from arcane.database.database import Database
 from arcane.personalities.base import Personality, TimingProfile
 from arcane.personalities.registry import load_personality
 from arcane.runtime import build_conversation_handler
 from tests.factories import DM, GENERAL, incoming, reply_to_bot
-from tests.fakes import FakeTransport, GatedProvider, ScriptedProvider
+from tests.fakes import FakeTransport, GatedProvider, RecordingProvider, ScriptedProvider
 
 MP3 = load_personality("mp3")
 OTHER_CHANNEL = ChannelInfo(channel_id=30, name="offtopic", guild_id=1, guild_name="Test Server")
@@ -86,6 +88,7 @@ async def make_harness(
 
     provider = provider or ScriptedProvider("sounds about right")
     transport = transport or FakeTransport([GENERAL, OTHER_CHANNEL])
+    transport.clock = clock
     handler = build_conversation_handler(
         personality=personality,
         settings=settings or Settings(humanize=False),
@@ -128,7 +131,7 @@ async def test_prompt_includes_history_and_target(db: Database) -> None:
 
     messages, _, _ = h.provider.calls[0]
     assert "bob: i've been reading about the bronze age collapse" in messages[1].content
-    assert 'replying to alice: "mp3 what caused it?"' in messages[0].content
+    assert 'replying to alice: "mp3 what caused it?"' in messages[-1].content
 
 
 async def test_unaddressed_message_is_stored_but_ignored(db: Database) -> None:
@@ -168,26 +171,31 @@ async def test_conversation_continues_and_stays_focused(db: Database) -> None:
     assert len(h.transport.sent) == 2
 
 
+FAST_READING = TimingProfile(
+    reaction_seconds=(0.05, 0.05),
+    reading_speed_wpm=100_000,
+    follow_up_wait_seconds=0,
+    pause_between_messages_seconds=(0, 0),
+    min_typing_seconds=0,
+    max_typing_seconds=0.01,
+    max_reading_seconds=1.0,
+    variation=0,
+)
+EXACT_TYPING = FAST_READING.model_copy(
+    update={"reaction_seconds": (0, 0), "min_typing_seconds": 0, "max_typing_seconds": 45}
+)
+
+
 async def test_bursts_are_answered_once(db: Database) -> None:
-    fast = TimingProfile(
-        reaction_seconds=(0, 0),
-        thinking_seconds=(0, 0),
-        pause_between_messages_seconds=(0, 0),
-        min_typing_seconds=0,
-        max_typing_seconds=0.01,
-        variation=0,
-        debounce_seconds=0.1,
-        max_debounce_seconds=1.0,
-    )
-    h = await make_harness(db, personality=_personality(timing=fast), settings=Settings())
+    h = await make_harness(db, personality=_personality(timing=FAST_READING), settings=Settings())
     await h.say("mp3 quick question", mentions_bot=True)
     await h.say("actually two questions")
     await h.say("what's your favourite paradox")
     await h.settle()
 
     assert len(h.provider.calls) == 1
-    system = h.provider.calls[0][0][0].content
-    assert "quick question actually two questions what's your favourite paradox" in system
+    context = "\n".join(m.content for m in h.provider.calls[0][0])
+    assert "quick question actually two questions what's your favourite paradox" in context
 
 
 async def test_reply_reference_when_others_spoke_in_between(db: Database) -> None:
@@ -227,6 +235,8 @@ async def test_provider_failure_is_silent(db: Database) -> None:
     assert h.transport.sent == []
     state = h.handler._tracker.get(GENERAL.channel_id)
     assert state is not None and state.bot_turns == 0
+    # The rate-limit slot held for the reply is given back.
+    assert h.handler._rate_limiter._users.count(ALICE, h.clock.now) == 0
 
 
 async def test_transport_failure_is_handled(db: Database) -> None:
@@ -287,16 +297,125 @@ async def test_stale_triggers_are_dropped(db: Database) -> None:
     assert h.transport.sent == []
 
 
-async def test_humanized_delays_are_applied(db: Database) -> None:
-    h = await make_harness(db, ScriptedProvider("x" * 70), settings=Settings())
-    # No real waiting: sleeps are recorded by the fake. Debounce uses real time,
-    # so shrink it for the test.
-    h.handler._timing.profile = MP3.timing.model_copy(update={"debounce_seconds": 0.01})
-    await h.say("mp3, why do you think we find symmetry beautiful?", mentions_bot=True)
+async def test_typing_starts_only_once_the_reply_is_ready(db: Database) -> None:
+    transport = FakeTransport([GENERAL, OTHER_CHANNEL])
+    provider = RecordingProvider(transport.events, "sounds right")
+    h = await make_harness(
+        db,
+        provider,
+        personality=_personality(timing=FAST_READING),
+        settings=Settings(),
+        transport=transport,
+    )
+    await h.say("mp3 you around", mentions_bot=True)
     await h.settle()
 
-    assert h.transport.texts == ["x" * 70]
-    assert sum(h.sleeps) > 2  # reading + thinking + typing
+    # Read and generate silently, then type, then send.
+    assert transport.events == ["generate", "typing_on", "send:sounds right", "typing_off"]
+
+
+async def test_no_typing_indicator_while_the_model_is_busy(db: Database) -> None:
+    provider = GatedProvider("ok")
+    h = await make_harness(db, provider, personality=_personality(timing=FAST_READING))
+    await h.say("mp3?", mentions_bot=True)
+    await provider.started.wait()
+    await asyncio.sleep(0.05)
+    assert h.transport.events == []
+    provider.gate.set()
+    await h.settle()
+    assert h.transport.events == ["typing_on", "send:ok", "typing_off"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "seconds"),
+    [
+        ("nothing much", 2.0),
+        (
+            "nothing much, the weather is great today, how have you been? just been catching "
+            "up with reading or whatnot?",
+            7.3,
+        ),
+    ],
+)
+async def test_typing_time_depends_on_reply_length(
+    db: Database, reply: str, seconds: float
+) -> None:
+    timing = EXACT_TYPING.model_copy(update={"typing_speed_wpm": 210, "typing_start_seconds": 1.2})
+    h = await make_harness(
+        db, ScriptedProvider(reply), personality=_personality(timing=timing), settings=Settings()
+    )
+    await h.say("hey, what's up?", mentions_bot=True)
+    await h.settle()
+
+    assert h.transport.texts == [reply]
+    assert sum(h.sleeps) == pytest.approx(seconds, abs=0.15)
+
+
+async def test_slow_generation_does_not_shorten_typing(db: Database) -> None:
+    provider = GatedProvider("ok")
+    h = await make_harness(
+        db, provider, personality=_personality(timing=EXACT_TYPING), settings=Settings()
+    )
+    await h.say("mp3?", mentions_bot=True)
+    await provider.started.wait()
+    await asyncio.sleep(0.1)  # the model takes a while to answer
+    provider.gate.set()
+    await h.settle()
+    assert h.transport.texts == ["ok"]
+    # Typing starts after generation and lasts as long as typing "ok" takes.
+    expected = EXACT_TYPING.typing_start_seconds + 2 / EXACT_TYPING.typing_cps
+    assert sum(h.sleeps) == pytest.approx(expected, abs=0.01)
+
+
+async def test_follow_up_while_thinking_is_answered_together(db: Database) -> None:
+    provider = GatedProvider("nah free will is real")
+    h = await make_harness(
+        db, provider, personality=_personality(timing=FAST_READING), settings=Settings()
+    )
+    await h.say("mp3 quick question", mentions_bot=True)
+    await provider.started.wait()
+    follow_up = await h.say("is free will real")
+    assert follow_up is not None and follow_up.reason is Reason.CONTINUATION
+    await asyncio.sleep(0.01)  # the handler notices and cancels the first draft
+    provider.gate.set()
+    await h.settle()
+
+    # The first draft was thrown away; one reply covers both messages.
+    assert h.transport.texts == ["nah free will is real"]
+    assert len(h.provider.calls) == 1
+    context = "\n".join(m.content for m in h.provider.calls[0][0])
+    assert "quick question\nalice: is free will real" in context
+    assert h.handler._rate_limiter._users.count(ALICE, h.clock.now) == 1
+
+
+async def test_short_opener_waits_for_the_real_message(db: Database) -> None:
+    timing = FAST_READING.model_copy(update={"follow_up_wait_seconds": 0.5})
+    h = await make_harness(
+        db,
+        ScriptedProvider("draft for yo", "yeah its real"),
+        personality=_personality(timing=timing),
+        settings=Settings(),
+    )
+    await h.say("yo mp3", mentions_bot=True)
+    await asyncio.sleep(0.15)  # the model has drafted a reply to "yo mp3" already
+    await h.say("is free will real")
+    await h.settle()
+
+    assert h.transport.texts == ["yeah its real"]
+    assert len(h.provider.calls) == 2
+
+
+async def test_message_arriving_during_generation_gets_its_own_reply(db: Database) -> None:
+    provider = GatedProvider("first reply", "second reply")
+    h = await make_harness(db, provider)
+    await h.say("mp3 what's up", mentions_bot=True)
+    await provider.started.wait()
+    follow_up = await h.say("also did you see the game")
+    provider.gate.set()
+    await h.settle()
+
+    assert follow_up is not None and follow_up.reason is Reason.CONTINUATION
+    assert h.transport.texts == ["first reply", "second reply"]
 
 
 async def test_edits_and_deletes(db: Database) -> None:
@@ -343,35 +462,147 @@ async def test_conversation_state_survives_restart(db: Database) -> None:
     await restarted.settle()
 
 
-async def test_initiative_posts_opener_once(db: Database) -> None:
-    eager = MP3.behavior.model_copy(
-        update={"initiative": MP3.behavior.initiative.model_copy(update={"chance": 1.0})}
-    )
+def _eager(**initiative: object) -> Personality:
+    profile = MP3.behavior.initiative.model_copy(update={"chance": 1.0, **initiative})
+    return _personality(behavior=MP3.behavior.model_copy(update={"initiative": profile}))
+
+
+async def test_chimes_in_with_a_message_of_its_own(db: Database) -> None:
     h = await make_harness(
         db,
-        ScriptedProvider("random thought: is math discovered or invented"),
-        personality=_personality(behavior=eager),
-        initiative=(GENERAL.channel_id,),
+        ScriptedProvider("is a hot dog a sandwich tho"),
+        personality=_eager(reply_chance=0.0),
     )
-    await h.say("gn all", created_at=h.clock.now - timedelta(hours=3))
+    await h.say("lol", author_id=BOB, author_name="bob", created_at=h.clock.now)
 
     assert await h.handler.maybe_initiate()
-    assert h.transport.texts == ["random thought: is math discovered or invented"]
-    system = h.provider.calls[0][0][0].content
-    assert "Start a new conversation about" in system
+    assert h.transport.texts == ["is a hot dog a sandwich tho"]
+    _, _, reference = h.transport.sent[0]
+    assert reference is None
+    note = h.provider.calls[0][0][-1].content
+    assert "People have been chatting here." in note
+    assert "Chime in with a message of your own about" in note
 
-    # The last message is now ours, so it won't talk into the void again.
+    # Its own message is the latest one now, and it is waiting for answers from
+    # bob, the only person who was active.
     assert not await h.handler.maybe_initiate()
-
-    answer = await h.say("ooh invented, definitely")
+    answer = await h.say("obviously not", author_id=BOB, author_name="bob")
     assert answer is not None and answer.reason is Reason.OPENER_REPLY
     await h.settle()
 
 
-async def test_initiative_requires_opt_in(db: Database) -> None:
-    h = await make_harness(db)
-    assert not h.handler.initiative_active
+async def test_in_a_busy_channel_only_direct_answers_count(db: Database) -> None:
+    h = await make_harness(
+        db, ScriptedProvider("is a hot dog a sandwich tho"), personality=_eager(reply_chance=0)
+    )
+    await h.say("lol", author_id=BOB, author_name="bob")
+    await h.say("ikr", author_id=ALICE)
+    assert await h.handler.maybe_initiate()
+
+    chatter = await h.say("anyway what time is it", author_id=BOB, author_name="bob")
+    assert chatter is not None and chatter.reason is Reason.NOT_ADDRESSED
+    direct = await h.say("nah", reply_to=reply_to_bot())
+    assert direct is not None and direct.reason is Reason.REPLY_TO_BOT
+    await h.settle()
+
+
+async def test_chime_in_gives_way_to_a_real_message(db: Database) -> None:
+    provider = GatedProvider("yeah im here")
+    h = await make_harness(db, provider, personality=_eager(reply_chance=0))
+    await h.say("lol", author_id=BOB, author_name="bob")
+    chime_in = asyncio.create_task(h.handler.maybe_initiate())
+    await provider.started.wait()
+    await h.say("mp3 you there?", channel=OTHER_CHANNEL, mentions_bot=True)
+    assert not await chime_in  # the draft was dropped for the real message
+    provider.gate.set()
+    await h.settle()
+    # Only the real answer was sent, in the channel where it was asked.
+    assert [(channel, text) for channel, text, _ in h.transport.sent] == [
+        (OTHER_CHANNEL.channel_id, "yeah im here")
+    ]
+
+
+async def test_failed_chime_in_still_counts_for_the_cooldown(db: Database) -> None:
+    h = await make_harness(
+        db, ScriptedProvider(ProviderUnavailableError("down")), personality=_eager(reply_chance=0)
+    )
+    await h.say("lol", author_id=BOB, author_name="bob")
     assert not await h.handler.maybe_initiate()
+    assert await h.handler._initiatives.last_at(GENERAL.channel_id) is not None
+    h.clock.advance(minutes=1)
+    assert not await h.handler.maybe_initiate()  # no retry loop every check
+
+
+async def test_chimes_in_by_replying_to_a_debatable_message(db: Database) -> None:
+    h = await make_harness(
+        db,
+        ScriptedProvider("nah free will is real, you chose to say that"),
+        personality=_eager(reply_chance=1.0),
+    )
+    debatable = incoming(
+        "honestly i think free will is fake and we just think we choose stuff",
+        author_id=BOB,
+        author_name="bob",
+        created_at=h.clock.now,
+    )
+    await h.handler.handle_message(debatable)
+    h.clock.advance(seconds=20)
+    await h.say("lmao", author_id=ALICE)
+
+    assert await h.handler.maybe_initiate()
+    _, _, reference = h.transport.sent[0]
+    assert reference == debatable.message_id
+    note = h.provider.calls[0][0][-1].content
+    assert "jumping in by replying to bob's message" in note
+
+    # Only bob's answer counts as an answer to it.
+    other = await h.say("anyway", author_id=ALICE)
+    assert other is not None and other.reason is Reason.NOT_ADDRESSED
+    answer = await h.say("nope, prove it", author_id=BOB, author_name="bob")
+    assert answer is not None and answer.reason is Reason.OPENER_REPLY
+    await h.settle()
+
+
+async def test_picks_the_most_recently_active_channel(db: Database) -> None:
+    h = await make_harness(db, ScriptedProvider("thoughts"), personality=_eager(reply_chance=0))
+    await h.say("old chatter", author_id=BOB, created_at=h.clock.now - timedelta(minutes=4))
+    await h.say("newer chatter", channel=OTHER_CHANNEL, author_id=BOB)
+    assert await h.handler.maybe_initiate()
+    assert h.transport.sent[0][0] == OTHER_CHANNEL.channel_id
+
+
+async def test_no_chime_in_while_talking_or_without_activity(db: Database) -> None:
+    h = await make_harness(db, ScriptedProvider("yo"), personality=_eager())
+    assert not await h.handler.maybe_initiate()  # nobody has said anything
+
+    await h.say("mp3 hows it going", mentions_bot=True)
+    await h.settle()
+    h.transport.sent.clear()
+    await h.say("lol", author_id=BOB, author_name="bob")
+    assert h.handler.engaged()
+    assert not await h.handler.maybe_initiate()
+
+    h.clock.advance(minutes=4)  # the conversation went quiet: idle again
+    await h.say("anyone here", author_id=BOB, author_name="bob")
+    assert not h.handler.engaged()
+    assert await h.handler.maybe_initiate()
+
+
+async def test_chime_in_respects_channel_restrictions_and_switches(db: Database) -> None:
+    restricted = await make_harness(
+        db, ScriptedProvider("hm"), personality=_eager(), initiative=(OTHER_CHANNEL.channel_id,)
+    )
+    await restricted.say("chatting in general", author_id=BOB)
+    assert not await restricted.handler.maybe_initiate()
+
+    off = await make_harness(
+        db,
+        ScriptedProvider("hm"),
+        personality=_eager(),
+        settings=Settings(humanize=False, initiative_enabled=False),
+    )
+    assert not off.handler.initiative_active
+    assert not await off.handler.maybe_initiate()
 
 
 async def test_reply_to_bot_message_is_answered(db: Database) -> None:
@@ -380,6 +611,122 @@ async def test_reply_to_bot_message_is_answered(db: Database) -> None:
     await h.settle()
     assert decision is not None and decision.reason is Reason.REPLY_TO_BOT
     assert h.transport.texts == ["sounds about right"]
+
+
+async def test_long_plain_conversation_is_followed(db: Database) -> None:
+    h = await make_harness(db)
+    first = await h.say("yo mp3", mentions_bot=True)
+    assert first is not None and first.reason is Reason.MENTION
+    await h.settle()
+
+    # Ten plain messages in under a minute: no replies, no mentions, still a conversation.
+    for i in range(10):
+        h.clock.advance(seconds=5)
+        decision = await h.say(f"plain message number {i}")
+        assert decision is not None and decision.reason is Reason.CONTINUATION, i
+        await h.settle()
+    assert len(h.transport.sent) == 11
+
+
+async def test_conversation_survives_other_people_talking(db: Database) -> None:
+    h = await make_harness(db)
+    await h.say("mp3 is cereal a soup", mentions_bot=True)
+    await h.settle()
+
+    other = await h.say("anyone got the homework", author_id=BOB, author_name="bob")
+    assert other is not None and other.reason is Reason.FOCUSED_ON_OTHER_USER
+
+    back = await h.say("like think about it, milk is the broth")
+    assert back is not None and back.reason is Reason.CONTINUATION
+    await h.settle()
+    assert len(h.transport.sent) == 2
+    system = h.provider.calls[-1][0]
+    assert "replying to alice" in "\n".join(m.content for m in system)
+
+
+async def test_partner_addressing_rules(db: Database) -> None:
+    h = await make_harness(db)
+    await h.say("mp3 you up", mentions_bot=True)
+    await h.settle()
+
+    passing = await h.say("i told bob about it", mentioned_user_ids=frozenset({BOB}))
+    assert passing is not None and passing.reason is Reason.CONTINUATION
+    own_reply = await h.say(
+        "and another thing",
+        reply_to=ReplyReference(message_id=1, author_id=ALICE, author_name="alice"),
+    )
+    assert own_reply is not None and own_reply.reason is Reason.CONTINUATION
+    to_bob = await h.say(
+        "@bob what do you think",
+        mentioned_user_ids=frozenset({BOB}),
+        addressed_user_ids=frozenset({BOB}),
+    )
+    assert to_bob is not None and to_bob.reason is Reason.ADDRESSED_ELSEWHERE
+    await h.settle()
+
+
+async def test_conversation_lasts_ten_minutes_of_silence(db: Database) -> None:
+    h = await make_harness(db)
+    await h.say("mp3 brb", mentions_bot=True)
+    await h.settle()
+    h.clock.advance(minutes=9)
+    back = await h.say("ok back")
+    assert back is not None and back.reason is Reason.CONTINUATION
+    await h.settle()
+
+
+async def test_history_window_start_stays_stable_for_cache_reuse(db: Database) -> None:
+    window = MP3.memory.history_messages
+    h = await make_harness(db, ScriptedProvider(*[f"reply {i}" for i in range(window * 3)]))
+    await h.say("mp3 lets talk", mentions_bot=True)
+    await h.settle()
+    for i in range(window * 2):
+        h.clock.advance(seconds=5)
+        await h.say(f"message {i}")
+        await h.settle()
+
+    firsts = [call[0][1].content for call in h.provider.calls]
+    changes = sum(1 for a, b in itertools.pairwise(firsts) if a != b)
+    # Each turn adds two messages (theirs and ours). A one-message sliding window
+    # would change the first history turn on nearly every reply once full; the
+    # anchored window only jumps forward once per `slack` new messages.
+    messages_added = 2 * len(firsts)
+    assert 1 <= changes <= messages_added // MP3.memory.history_slack
+    longest = max(len(call[0]) for call in h.provider.calls)
+    assert longest <= MP3.memory.max_history_messages + 2
+
+
+async def test_long_messages_do_not_make_the_history_slide(db: Database) -> None:
+    """With the character budget binding, the window must still move in jumps."""
+    replies = [f"reply {i} " + "y" * 300 for i in range(40)]
+    h = await make_harness(db, ScriptedProvider(*replies))
+    await h.say("mp3 essay time", mentions_bot=True)
+    await h.settle()
+    for i in range(20):
+        h.clock.advance(seconds=5)
+        await h.say(f"long message {i} " + "x" * 300)
+        await h.settle()
+
+    firsts = [call[0][1].content for call in h.provider.calls]
+    changes = sum(1 for a, b in itertools.pairwise(firsts) if a != b)
+    budget = MP3.memory.history_char_budget
+    assert 1 <= changes <= len(firsts) // 2
+    for call in h.provider.calls:
+        history_chars = sum(len(m.content) for m in call[0][1:-1])
+        assert history_chars <= budget + 400
+
+
+async def test_build_uses_a_single_leading_system_message(db: Database) -> None:
+    h = await make_harness(db)
+    await h.say("mp3 hi", mentions_bot=True)
+    await h.settle()
+    await h.say("whats up")
+    await h.settle()
+    for messages, _, _ in h.provider.calls:
+        roles = [m.role for m in messages]
+        assert roles[0] == "system"
+        assert roles.count("system") == 1
+        assert roles[-1] == "user"
 
 
 async def test_close_cancels_in_flight_work(db: Database) -> None:
@@ -394,3 +741,19 @@ async def test_close_cancels_in_flight_work(db: Database) -> None:
 
 def test_harness_provider_type() -> None:
     assert issubclass(ScriptedProvider, LLMProvider)
+
+
+async def test_a_hanging_send_cannot_keep_it_typing(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(handler_module, "SEND_TIMEOUT_SECONDS", 0.05)
+    transport = FakeTransport([GENERAL])
+
+    async def hang(*_: object, **__: object) -> None:
+        await asyncio.Event().wait()
+
+    transport.send = hang  # type: ignore[assignment,method-assign]
+    h = await make_harness(db, transport=transport)
+    await h.say("mp3 you there", mentions_bot=True)
+    await asyncio.wait_for(h.settle(), timeout=2)
+    assert transport.events == ["typing_on", "typing_off"]

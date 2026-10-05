@@ -17,6 +17,7 @@ from arcane.app import EXIT_FAILURE, EXIT_OK, Application
 from arcane.bot.bot import ArcaneBot
 from arcane.cli import TerminalTransport, _chat, _check, main
 from arcane.config.settings import OllamaSettings, Settings, load_bot_configs
+from arcane.personalities.registry import load_personality
 from tests.fakes import FakeOllama, chat_body
 
 
@@ -169,6 +170,11 @@ async def test_application_runs_until_stopped(
     app.request_stop()
     assert await asyncio.wait_for(run, 5) == EXIT_OK
     assert (tmp_path / "arcane.db").exists()
+    # The model was preloaded with the num_ctx replies use, before connecting.
+    fake = fake_ollama[0]
+    assert [load["options"].get("num_ctx") for load in fake.loads] == [
+        load_personality("mp3").model.context_window
+    ]
 
 
 async def test_application_reports_login_failure(
@@ -196,11 +202,11 @@ async def test_application_warns_when_backend_is_down(
     assert "Bots will stay silent" in caplog.text
 
 
-async def test_initiative_task_only_with_channels(
+async def test_initiative_task_runs_unless_disabled(
     tmp_path: Path, fake_ollama: tuple[FakeOllama, str]
 ) -> None:
-    quiet = _app(tmp_path, fake_ollama[1])
-    eager = _app(tmp_path, fake_ollama[1], initiative_channel_ids=(42,))
+    quiet = _app(tmp_path, fake_ollama[1], initiative_enabled=False)
+    eager = _app(tmp_path, fake_ollama[1])
     try:
         (quiet_runtime,) = [quiet._build_runtime(c) for c in quiet._bot_configs]
         (eager_runtime,) = [eager._build_runtime(c) for c in eager._bot_configs]

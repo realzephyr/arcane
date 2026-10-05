@@ -1,48 +1,33 @@
-"""Human-like timing.
+"""Human-like pacing.
 
-People don't answer instantly. They notice a message, read it, think, and
-type at a finite speed, and they're never perfectly consistent.
-:class:`HumanTiming` models each of those steps from the personality's
-:class:`~arcane.personalities.base.TimingProfile`:
+A person in a chat notices a message, reads it while working out what to say,
+then types the reply. :class:`HumanTiming` models those steps from the
+personality's :class:`~arcane.personalities.base.TimingProfile`:
 
-* **reading**: reaction time plus message length at reading speed;
-* **thinking**: a base delay plus a bonus for complex messages;
-* **typing**: reply length at typing speed, clamped to sensible bounds;
+* **reaction**: a short moment to notice new messages;
+* **reading**: message length at reading speed, plus a short wait when the
+  message is only an attention-getter ("yo", "mp3"). The model generates the
+  reply during this phase, with no typing indicator;
+* **typing**: once the reply is ready, a start-up moment plus the reply's
+  length at typing speed, so short replies are quick and long ones take longer;
 * **pauses** between consecutive messages of a split reply.
 
-Every duration gets multiplicative log-normal noise, which is always positive
-and skews long like real human timing. When humanisation is disabled every
-delay is zero, which keeps development and tests fast.
+Reading and typing times get multiplicative log-normal noise, which is always
+positive and skews slightly long like real human timing. When humanisation is
+disabled every delay is zero, which keeps development and tests fast.
 """
 
 from __future__ import annotations
 
 import math
 import random
-import re
 from dataclasses import dataclass, field
 
 from arcane.personalities.base import TimingProfile
 
-MAX_READING_SECONDS = 12.0
-MAX_THINKING_SECONDS = 7.0
-COMPLEXITY_THINKING_BONUS = 3.0
-
-_DEEP_WORDS = re.compile(
-    r"\b(why|how|explain|think|believe|opinion|argue|argument|disagree|agree|"
-    r"meaning|ethic\w*|moral\w*|conscious\w*|exist\w*|would you|what if)\b",
-    re.IGNORECASE,
-)
-
-
-def estimate_complexity(text: str) -> float:
-    """Rough complexity of a message in ``[0, 1]``: length, questions, depth."""
-    if not text.strip():
-        return 0.0
-    length_score = min(len(text) / 400, 1.0)
-    question_score = min(text.count("?") / 2, 1.0)
-    depth_score = min(len(_DEEP_WORDS.findall(text)) / 3, 1.0)
-    return min(0.5 * length_score + 0.2 * question_score + 0.3 * depth_score, 1.0)
+ATTENTION_GETTER_CHARS = 15
+"""Messages up to this long without a question mark ("yo", "mp3", "hey u there")
+usually have the actual message following right behind them."""
 
 
 @dataclass(slots=True)
@@ -53,53 +38,46 @@ class HumanTiming:
     enabled: bool = True
     rng: random.Random = field(default_factory=random.Random)
 
-    # --------------------------------------------------------------- components
-
-    def reading_delay(self, incoming_text: str) -> float:
-        """Time between a message arriving and starting to think about it."""
+    def reaction_delay(self) -> float:
+        """Time to notice new messages before starting to read them."""
         if not self.enabled:
             return 0.0
-        reaction = self._uniform(self.profile.reaction_seconds)
-        reading = len(incoming_text) / self.profile.reading_speed_cps
-        return min(self._noisy(reaction + reading), MAX_READING_SECONDS)
+        return self._uniform(self.profile.reaction_seconds)
 
-    def thinking_delay(self, incoming_text: str) -> float:
-        """Time spent thinking before typing starts."""
+    def reading_time(self, incoming_text: str) -> float:
+        """Time to read ``incoming_text`` (without the reaction delay)."""
+        if not self.enabled or not incoming_text:
+            return 0.0
+        return self._noisy(len(incoming_text) / self.profile.reading_cps)
+
+    def follow_up_wait(self, incoming_text: str) -> float:
+        """Extra time to wait for the rest when ``incoming_text`` is just an opener."""
         if not self.enabled:
             return 0.0
-        base = self._uniform(self.profile.thinking_seconds)
-        bonus = estimate_complexity(incoming_text) * COMPLEXITY_THINKING_BONUS
-        return min(self._noisy(base + bonus), MAX_THINKING_SECONDS)
+        text = incoming_text.strip()
+        if len(text) > ATTENTION_GETTER_CHARS or "?" in text:
+            return 0.0
+        return self.profile.follow_up_wait_seconds
+
+    def max_reading_seconds(self) -> float:
+        """Upper bound for a whole reading phase, follow-up messages included."""
+        if not self.enabled:
+            return 0.0
+        return self.profile.max_reading_seconds
 
     def typing_duration(self, outgoing_text: str) -> float:
-        """How long typing ``outgoing_text`` takes."""
+        """How long the typing indicator shows before ``outgoing_text`` is sent."""
         if not self.enabled:
             return 0.0
-        raw = self._noisy(len(outgoing_text) / self.profile.typing_speed_cps)
-        return min(max(raw, self.profile.min_typing_seconds), self.profile.max_typing_seconds)
+        profile = self.profile
+        raw = self._noisy(profile.typing_start_seconds + len(outgoing_text) / profile.typing_cps)
+        return min(max(raw, profile.min_typing_seconds), profile.max_typing_seconds)
 
     def pause_between_messages(self) -> float:
         """Short pause after sending one message before typing the next."""
         if not self.enabled:
             return 0.0
         return self._uniform(self.profile.pause_between_messages_seconds)
-
-    # --------------------------------------------------------------- composites
-
-    def response_lead_time(self, incoming_text: str) -> float:
-        """Reading plus thinking: everything before the first keystroke."""
-        return self.reading_delay(incoming_text) + self.thinking_delay(incoming_text)
-
-    def debounce_window(self) -> float:
-        """How long to wait for follow-up messages before answering."""
-        if not self.enabled:
-            return 0.0
-        return self.profile.debounce_seconds
-
-    def max_debounce(self) -> float:
-        if not self.enabled:
-            return 0.0
-        return self.profile.max_debounce_seconds
 
     # ---------------------------------------------------------------- internals
 

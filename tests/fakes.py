@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from aiohttp import web
@@ -83,6 +84,24 @@ class GatedProvider(ScriptedProvider):
         return await super().chat(messages, model=model, options=options)
 
 
+class RecordingProvider(ScriptedProvider):
+    """A scripted provider that appends "generate" to a shared event log."""
+
+    def __init__(self, events: list[str], *replies: str | Exception) -> None:
+        super().__init__(*replies)
+        self.events = events
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        options: GenerationOptions | None = None,
+    ) -> GenerationResult:
+        self.events.append("generate")
+        return await super().chat(messages, model=model, options=options)
+
+
 class FakeTransport:
     """Records typing indicators and sent messages."""
 
@@ -91,11 +110,15 @@ class FakeTransport:
         self.fail_sends = fail_sends
         self.sent: list[tuple[int, str, int | None]] = []
         self.events: list[str] = []
+        self.event_times: list[float] = []
+        self.clock: Callable[[], datetime] = utcnow
+        """Timestamps for sent messages; tests with a fake clock replace it."""
         self._ids = itertools.count(50_000)
 
     @asynccontextmanager
     async def typing(self, channel_id: int) -> AsyncIterator[None]:
         self.events.append("typing_on")
+        self.event_times.append(asyncio.get_running_loop().time())
         try:
             yield
         finally:
@@ -110,7 +133,7 @@ class FakeTransport:
         self.events.append(f"send:{content}")
         return SentMessage(
             message_id=next(self._ids),
-            created_at=utcnow(),
+            created_at=self.clock(),
             author_id=BOT_USER_ID,
             author_name="mp3",
         )
@@ -130,28 +153,58 @@ class FakeOllama:
     chat_responses: list[tuple[int, Any]] = field(default_factory=list)
     models: list[str] = field(default_factory=lambda: ["llama3.1:8b", "gemma3:latest"])
     requests: list[dict[str, Any]] = field(default_factory=list)
+    loads: list[dict[str, Any]] = field(default_factory=list)
+    """Chat requests without messages, which Ollama treats as "load the model"."""
+    load_duration_ns: int = 0
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    """``/api/show`` answers per model name; unknown models report plain completion."""
+    shows: list[str] = field(default_factory=list)
+    version: str | None = "0.35.1"
     delay: float = 0.0
     in_flight: int = 0
     max_in_flight: int = 0
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
-        self.requests.append(await request.json())
+        body = await request.json()
+        if body.get("messages") == []:
+            self.loads.append(body)
+            return web.json_response(
+                {
+                    "model": body["model"],
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": "load",
+                }
+            )
+        self.requests.append(body)
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
-            status, body = (
+            status, response = (
                 self.chat_responses.pop(0)
                 if self.chat_responses
                 else (200, chat_body("default reply"))
             )
         finally:
             self.in_flight -= 1
-        return web.json_response(body, status=status)
+        if status == 200 and self.load_duration_ns and isinstance(response, dict):
+            response = {**response, "load_duration": self.load_duration_ns}
+        return web.json_response(response, status=status)
 
     async def tags(self, _request: web.Request) -> web.StreamResponse:
         return web.json_response({"models": [{"name": name} for name in self.models]})
+
+    async def show(self, request: web.Request) -> web.StreamResponse:
+        model = (await request.json())["model"]
+        self.shows.append(model)
+        return web.json_response(self.capabilities.get(model, {"capabilities": ["completion"]}))
+
+    async def version_info(self, _request: web.Request) -> web.StreamResponse:
+        if self.version is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"version": self.version})
 
 
 def chat_body(content: str) -> dict[str, Any]:

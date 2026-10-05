@@ -25,6 +25,10 @@ from arcane.database.models import ConversationRecord
 
 logger = logging.getLogger(__name__)
 
+NOBODY = 0
+"""``awaiting_reply_from`` value meaning only direct answers (replies, mentions,
+its name) count, not anyone's next plain message."""
+
 
 @dataclass(slots=True)
 class ConversationState:
@@ -42,7 +46,10 @@ class ConversationState:
     user_turns: int = 0
     last_bot_message_at: datetime | None = None
     awaiting_reply_since: datetime | None = None
-    """Set when the bot posted an opener nobody has answered yet."""
+    """Set when the bot chimed in on its own and nobody has answered yet."""
+    awaiting_reply_from: int | None = None
+    """Whose plain message counts as an answer: ``None`` anyone's, a user id only
+    theirs, :data:`NOBODY` nobody's (only direct replies count)."""
 
     def is_active(self, now: datetime, timeout: timedelta) -> bool:
         return now - self.last_activity_at <= timeout
@@ -57,6 +64,10 @@ class ConversationState:
 
     def awaiting_reply(self, now: datetime, window: timedelta) -> bool:
         return self.awaiting_reply_since is not None and now - self.awaiting_reply_since <= window
+
+    def awaits_reply_from(self, author_id: int, now: datetime, window: timedelta) -> bool:
+        """True if a message from ``author_id`` now counts as an answer to the bot."""
+        return self.awaiting_reply(now, window) and self.awaiting_reply_from in (None, author_id)
 
     def other_participant_names(self) -> list[str]:
         return [name for uid, name in self.participants.items() if uid != self.partner_id]
@@ -74,6 +85,7 @@ class ConversationState:
             bot_turns=self.bot_turns,
             user_turns=self.user_turns,
             awaiting_reply_since=self.awaiting_reply_since,
+            awaiting_reply_from=self.awaiting_reply_from,
         )
 
     @classmethod
@@ -90,6 +102,7 @@ class ConversationState:
             bot_turns=record.bot_turns,
             user_turns=record.user_turns,
             awaiting_reply_since=record.awaiting_reply_since,
+            awaiting_reply_from=record.awaiting_reply_from,
         )
 
 
@@ -110,6 +123,7 @@ class ConversationTracker:
         self.opener_window = opener_window
         self._conversations: dict[int, ConversationState] = {}
         self._last_bot_message_at: dict[int, datetime] = {}
+        self._retired: list[ConversationState] = []
 
     # ------------------------------------------------------------------ queries
 
@@ -127,6 +141,13 @@ class ConversationTracker:
 
     def last_bot_message_at(self, channel_id: int) -> datetime | None:
         return self._last_bot_message_at.get(channel_id)
+
+    def engaged(self, now: datetime, within: timedelta) -> bool:
+        """True if any conversation had activity within ``within`` or awaits answers."""
+        return any(
+            now - state.last_activity_at <= within or state.awaiting_reply(now, self.opener_window)
+            for state in self._conversations.values()
+        )
 
     def __len__(self) -> int:
         return len(self._conversations)
@@ -170,6 +191,7 @@ class ConversationTracker:
         state.user_turns += 1
         state.last_activity_at = now
         state.awaiting_reply_since = None
+        state.awaiting_reply_from = None
         return state
 
     def note_partner_activity(self, message: IncomingMessage, now: datetime) -> None:
@@ -185,11 +207,25 @@ class ConversationTracker:
         *,
         guild_id: int | None = None,
         initiated: bool = False,
+        replied_to: int | None = None,
+        awaiting_from: int | None = None,
     ) -> ConversationState:
-        """Record that the bot sent a message (a reply or an opener)."""
+        """Record that the bot sent a message (a reply or something it started).
+
+        Args:
+            initiated: The bot chimed in on its own; the next answer starts a
+                conversation.
+            replied_to: The person the message answered. Replying to the
+                partner keeps them in focus while they read it and type back.
+            awaiting_from: With ``initiated``, only answers from this person count.
+        """
         self._last_bot_message_at[channel_id] = now
         state = self._conversations.get(channel_id)
-        if state is None or (initiated and not state.is_active(now, self.timeout)):
+        if initiated and state is not None:
+            # Chiming in starts a new conversation; the old one is finished.
+            self._retired.append(state)
+            state = None
+        if state is None:
             state = ConversationState(
                 channel_id=channel_id,
                 guild_id=guild_id,
@@ -200,18 +236,21 @@ class ConversationTracker:
         state.bot_turns += 1
         state.last_bot_message_at = now
         state.last_activity_at = now
+        if replied_to is not None and replied_to == state.partner_id:
+            state.partner_last_message_at = now
         if initiated:
             state.awaiting_reply_since = now
+            state.awaiting_reply_from = awaiting_from
         return state
 
     def end(self, channel_id: int) -> ConversationState | None:
         return self._conversations.pop(channel_id, None)
 
     def expire(self, now: datetime) -> list[ConversationState]:
-        """Remove and return conversations that have timed out.
+        """Remove and return conversations that have timed out or were replaced.
 
-        A conversation waiting for answers to an opener is kept until the
-        opener window has lapsed too, so late answers are still recognised.
+        A conversation waiting for answers to a chime-in is kept until the
+        answer window has lapsed too, so late answers are still recognised.
         """
         expired = [
             state
@@ -221,6 +260,8 @@ class ConversationTracker:
         ]
         for state in expired:
             del self._conversations[state.channel_id]
+        expired = [*self._retired, *expired]
+        self._retired.clear()
         stale_channels = [
             channel_id
             for channel_id, at in self._last_bot_message_at.items()

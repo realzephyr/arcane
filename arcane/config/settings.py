@@ -65,11 +65,13 @@ class OllamaSettings(BaseSettings):
     model: str = "llama3.1:8b"
     timeout_seconds: float = Field(default=120.0, gt=0)
     connect_timeout_seconds: float = Field(default=10.0, gt=0)
-    keep_alive: str = "30m"
+    keep_alive: str = "24h"
+    """How long Ollama keeps the model loaded after a request ("-1m" = forever)."""
     max_concurrent_requests: int = Field(default=1, ge=1, le=64)
     max_retries: int = Field(default=2, ge=0, le=10)
     think: bool | None = None
-    """Ollama's ``think`` flag. ``None`` omits it (for models without thinking)."""
+    """Ollama's ``think`` flag. ``None`` (the default) decides per model: thinking is
+    turned off for models that have a thinking mode, because it delays every reply."""
 
     @field_validator("base_url")
     @classmethod
@@ -104,8 +106,12 @@ class Settings(BaseSettings):
     long_term_memory_enabled: bool = True
 
     allowed_channel_ids: ChannelIdList = ()
+    """Channels the bots may read and talk in; empty means every channel they can see."""
     initiative_channel_ids: ChannelIdList = ()
+    """Channels the bots may chime into on their own; empty means any allowed channel
+    (except ones whose names suggest unprompted chatter is unwelcome, like #vent)."""
     initiative_enabled: bool = True
+    """Whether bots chime into active chats on their own when they aren't talking."""
     respond_in_dms: bool = True
     humanize: bool = True
     conversation_timeout_seconds: int | None = Field(default=None, ge=30)

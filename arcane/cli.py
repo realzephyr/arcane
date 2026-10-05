@@ -262,9 +262,12 @@ async def _chat(
             provider=provider,
             transport=TerminalTransport(personality.name),
         )
-        health = await provider.health_check(personality.model.model or provider.default_model)
+        model = personality.model.model or provider.default_model
+        health = await provider.health_check(model)
         if not health.available or health.model_available is False:
             print(f"warning: {health.detail}", file=sys.stderr)
+        else:
+            await provider.warm_up(model=model, options=handler.response_manager.base_options())
 
         print(f"Chatting with {personality.name}. Type /quit to leave.\n")
         message_ids = itertools.count(1)

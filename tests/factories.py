@@ -33,6 +33,7 @@ def incoming(
     author_is_bot: bool = False,
     is_self: bool = False,
     mentioned_user_ids: frozenset[int] = frozenset(),
+    addressed_user_ids: frozenset[int] = frozenset(),
     message_id: int | None = None,
     attachments: tuple[str, ...] = (),
 ) -> IncomingMessage:
@@ -47,6 +48,7 @@ def incoming(
         is_self=is_self,
         mentions_bot=mentions_bot,
         mentioned_user_ids=mentioned_user_ids,
+        addressed_user_ids=addressed_user_ids,
         reply_to=reply_to,
         attachments=attachments,
     )
