@@ -43,10 +43,23 @@ for mp3.
   video, games, pictures, friend requests, meetups and socials with a casual
   excuse, makes no real-world commitments, and keeps it family friendly.
 
+- **mp3 is now a normal 18-year-old guy on the internet** (chosen by a judge
+  panel over three drafts): short lowercase messages, never an exclamation
+  point, light casual swearing, family friendly, declines voice calls, games,
+  pictures, meetups and socials with a casual excuse, honest about being a bot
+  when sincerely asked, and still into history, space and what-if arguments.
+- `keep_alive` defaults to 24h and the model is preloaded at startup with the
+  same `num_ctx` replies use.
+
 ### Added
 
-- `arcane/ai/guards.py`: detects requests the bot can't fulfil and adds a
-  direct per-turn instruction to decline.
+- `arcane/ai/guards.py`: detects 14 kinds of requests the bot can't fulfil
+  (voice/video calls, streaming, games, media, friend requests, socials, phone
+  calls, meetups, links, reminders, pings, reactions, server invites) and adds
+  a direct per-turn instruction to decline. Validated against 455 example
+  messages in `tests/data/guard_cases.json`.
+- Reply logs show prompt and cached token counts; a warning is logged when
+  Ollama reloads the model mid-session.
 - `StyleProfile.allow_exclamation_points`, `lowercase_starts` and
   `blocked_patterns`.
 - `IncomingMessage.addressed_user_ids` (leading @mentions).

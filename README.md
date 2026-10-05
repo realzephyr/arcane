@@ -4,10 +4,13 @@
 the way people do: with a consistent personality, memory of what was said, a sense of
 who they are talking to, and the patience to type before they speak.
 
-The first personality is **mp3**: a curious, intellectually motivated regular who likes
-education, philosophy, science, history, and a good debate. The framework is built so
-that more personalities, more bot accounts, and other AI models can be added without
-touching the core.
+The first personality is **mp3**: a normal 18-year-old guy hanging out in your server.
+Games, music, youtube at 3am, a cooked sleep schedule, random rabbit holes about history
+and space, and opinions he'll argue for. He types short and lowercase, never uses
+exclamation points, swears casually but keeps it family friendly, and turns down anything
+a text bot can't do ("nah i dont do vc"). The framework is built so that more
+personalities, more bot accounts, and other AI models can be added without touching the
+core.
 
 > Status: **v0.2.0**. Single process, local inference via Ollama, SQLite storage.
 > See the [changelog](CHANGELOG.md) and the [roadmap](#roadmap).
@@ -26,6 +29,7 @@ touching the core.
 - [Adding a personality](#adding-a-personality)
 - [Development](#development)
 - [Roadmap](#roadmap)
+- [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
 - [Security & privacy](#security--privacy)
 
@@ -88,11 +92,13 @@ message ──► adapter ──► short-term memory ──► decision engine 
                                                                  │
                                                                  ▼
                                                         channel session
-                                       debounce → read delay → typing… → generate
-                                                  (prompt: personality + history
-                                                   + memory + Discord context)
+                          read (no indicator; follow-ups are read too)
                                                                  │
-                                                post-process → split → type → send
+                              typing… while the model generates ─┤
+                                (static persona prompt + cached  │
+                                 history + per-turn note)        │
+                                                                 ▼
+                    post-process → split → keep typing until 60 wpm → send
 ```
 
 Each channel has its own session that serialises replies, so the bot never talks
@@ -131,8 +137,9 @@ pip install -r requirements.txt
 ollama pull llama3.1:8b
 ```
 
-Any chat model works; set `ARCANE_OLLAMA_MODEL` to use a different one
-(e.g. `qwen3:8b`, `gemma3:12b`, `mistral-nemo`).
+Any chat model works; set `ARCANE_OLLAMA_MODEL` to use a different one, e.g.
+`llama3.2:3b` on CPU-only machines, `qwen3:8b` (with `ARCANE_OLLAMA_THINK=false`), or
+`mistral-nemo`. Avoid gemma3 and other sliding-window models (see [Performance](#performance)).
 
 ### 3. Create the Discord bot
 
@@ -366,6 +373,33 @@ Docker build on every push and pull request.
 
 ---
 
+## Performance
+
+Replies are paced like a person typing at 60 wpm, so a 50-character answer takes about
+10 seconds by design; the typing indicator shows while the model generates, and generation
+time counts towards those 10 seconds. Anything slower than that is the model. Every reply
+is logged with `prompt N tokens, M cached`, which tells you whether the cache is working.
+
+- **Use Ollama 0.30 or newer.** It reuses the cached prompt prefix between requests;
+  0.33.3+ also reports cached tokens in the logs.
+- **Keep the model loaded.** `ARCANE_OLLAMA_KEEP_ALIVE=24h` is the default (`-1m` keeps it
+  forever), and Arcane preloads the model at startup. A warning is logged if Ollama
+  reloads it mid-session.
+- **Don't fight the cache.** Arcane keeps the system prompt identical across turns, moves
+  the conversation window in jumps, and sends the same `num_ctx` on every request (a
+  different `num_ctx` makes Ollama reload the model). Bots that share a model should use
+  the same `context_window`.
+- **Give side requests their own slot.** With `OLLAMA_NUM_PARALLEL=2` on the Ollama
+  server, memory extraction and conversation openers stop evicting the conversation's
+  cached prompt (about 0.5 GB extra memory for an 8B model at 4k context).
+- **On CPU, reading the prompt dominates.** Prefer a 3B model (`llama3.2:3b`,
+  `qwen2.5:3b`), keep `max_tokens` around 120-160, leave flash attention on auto (or set
+  `OLLAMA_FLASH_ATTENTION=1`), and consider `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **Avoid sliding-window models** such as gemma3: llama.cpp may re-read the whole prompt
+  for them on every request, which defeats the cache.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -375,7 +409,7 @@ Docker build on every push and pull request.
 | Bot is online but never answers | The channel isn't in `ARCANE_ALLOWED_CHANNEL_IDS`, or the bot lacks *Send Messages* there. Run with `ARCANE_LOG_LEVEL=DEBUG` to see each decision. |
 | `AI backend 'ollama' is unavailable` | Ollama isn't running or `ARCANE_OLLAMA_BASE_URL` is wrong. Bots stay silent until it's reachable. |
 | `model '...' is not installed` | Run `ollama pull <model>`. |
-| Replies are slow | Pacing targets 60 wpm, so a 50-character reply takes about 10 s by design. If replies take much longer than that, the model is the bottleneck: use a GPU, a smaller model (e.g. `llama3.2:3b`), keep `ARCANE_OLLAMA_KEEP_ALIVE` long so the model stays loaded, and don't raise `context_window` unnecessarily. `ARCANE_HUMANIZE=false` removes the simulated delays entirely. |
+| Replies are slow | Pacing targets 60 wpm, so a 50-character reply takes about 10 s by design. If replies take much longer, the model is the bottleneck: see [Performance](#performance). `ARCANE_HUMANIZE=false` removes the simulated delays entirely. |
 | Output contains reasoning text | Use a non-reasoning model, or set `ARCANE_OLLAMA_THINK=false` for qwen3 / deepseek-r1. |
 
 `python main.py check` diagnoses most of these in one go.
