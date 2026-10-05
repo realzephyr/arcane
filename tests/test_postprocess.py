@@ -11,7 +11,18 @@ from arcane.ai.postprocess import (
 from arcane.ai.text import strip_reasoning
 from arcane.personalities.registry import load_personality
 
-PROCESSOR = ResponsePostProcessor(load_personality("mp3"))
+_MP3 = load_personality("mp3")
+# Generic cleanup is tested with mp3's style switches off; mp3's own rules are
+# tested separately below.
+PROCESSOR = ResponsePostProcessor(
+    _MP3.model_copy(
+        update={
+            "style": _MP3.style.model_copy(
+                update={"allow_exclamation_points": True, "lowercase_starts": False}
+            )
+        }
+    )
+)
 
 
 def clean(raw: str, **kwargs: object) -> list[str]:
@@ -112,3 +123,10 @@ def test_blocked_patterns_flag_the_reply() -> None:
     processor = _styled(blocked_patterns=(r"\bforbidden\w*",))
     assert processor.process("that word is FORBIDDEN here").blocked
     assert not processor.process("all good").blocked
+
+
+def test_mp3_output_rules() -> None:
+    mp3 = ResponsePostProcessor(_MP3)
+    parts = mp3.process("Yeah that's insane!!\n\nNo way!").parts
+    assert parts == ("yeah that's insane", "no way")
+    assert all("!" not in part for part in parts)

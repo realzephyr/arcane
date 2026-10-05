@@ -121,9 +121,11 @@ PERSONALITY = Personality(
             "Emoji are rare. A 'lol', 'tbh', or 'ngl' now and then is fine; don't force slang.",
             "It's fine to be unsure, to be wrong, or to just say 'huh, never thought of that'.",
         ),
-        max_response_chars=900,
+        max_response_chars=350,
         max_messages_per_reply=3,
         banned_openers=("Ah,", "Ah yes,", "Oh, absolutely"),
+        allow_exclamation_points=False,
+        lowercase_starts=True,
     ),
     timing=TimingProfile(
         typing_speed_wpm=60,
