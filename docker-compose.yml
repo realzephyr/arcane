@@ -1,0 +1,43 @@
+# Arcane + Ollama.
+#
+#   cp .env.example .env            # add ARCANE_BOT_MP3_TOKEN
+#   docker compose up -d
+#   docker compose exec ollama ollama pull llama3.1:8b
+#   docker compose logs -f arcane
+#
+# To use an Ollama already running on the host instead, remove the `ollama`
+# service and set ARCANE_OLLAMA_BASE_URL=http://host.docker.internal:11434.
+
+services:
+  arcane:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ARCANE_OLLAMA_BASE_URL: http://ollama:11434
+      ARCANE_DATABASE_PATH: /app/data/arcane.db
+      ARCANE_LOG_FILE: /app/logs/arcane.log
+    volumes:
+      - arcane-data:/app/data
+      - arcane-logs:/app/logs
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment to use an NVIDIA GPU (requires the NVIDIA Container Toolkit).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  arcane-data:
+  arcane-logs:
+  ollama-models:

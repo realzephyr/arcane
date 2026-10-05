@@ -9,7 +9,8 @@ education, philosophy, science, history, and a good debate. The framework is bui
 that more personalities, more bot accounts, and other AI models can be added without
 touching the core.
 
-> Status: **v0.1 (foundation)**. Single-process, local inference via Ollama, SQLite storage.
+> Status: **v0.1.0 (foundation)**. Single process, local inference via Ollama, SQLite storage.
+> See the [changelog](CHANGELOG.md) and the [roadmap](#roadmap).
 
 ---
 
@@ -25,6 +26,7 @@ touching the core.
 - [Adding a personality](#adding-a-personality)
 - [Development](#development)
 - [Roadmap](#roadmap)
+- [Troubleshooting](#troubleshooting)
 - [Security & privacy](#security--privacy)
 
 ---
@@ -161,10 +163,16 @@ python main.py chat --personality mp3
 ### Docker
 
 ```bash
-cp .env.example .env     # add your token
-docker compose up -d     # starts Arcane and an Ollama container
-docker compose exec ollama ollama pull llama3.1:8b
+cp .env.example .env                                  # add your token
+docker compose up -d                                  # Arcane + an Ollama container
+docker compose exec ollama ollama pull llama3.1:8b    # once, to download the model
+docker compose run --rm arcane check                  # preflight inside the container
+docker compose logs -f arcane
 ```
+
+The image runs as an unprivileged user; the database and logs live in named volumes.
+To use an Ollama server that already runs on the host, see the comments in
+[`docker-compose.yml`](docker-compose.yml).
 
 ---
 
@@ -195,7 +203,7 @@ All configuration comes from environment variables (or `.env`). See
 | `ARCANE_SHORT_TERM_TTL_HOURS` | `24` | Age after which stored messages are deleted. |
 | `ARCANE_MAX_MESSAGES_PER_CHANNEL` | `300` | Hard cap of stored messages per channel. |
 | `ARCANE_LONG_TERM_MEMORY_ENABLED` | `true` | Extract durable facts when conversations end. |
-| `ARCANE_LOG_LEVEL` | `INFO` | `DEBUG` also logs message content. |
+| `ARCANE_LOG_LEVEL` | `INFO` | `DEBUG` logs every respond/ignore decision with its reason. |
 | `ARCANE_LOG_FILE` | — | Rotating log file path. |
 
 Personality-specific behaviour (response probabilities, timing, initiative caps,
@@ -223,10 +231,11 @@ Stop with `Ctrl+C` (or `SIGTERM` in containers); Arcane shuts down cleanly.
 arcane/
 ├── main.py                     # entry point
 ├── arcane/
-│   ├── app.py                  # composition root & lifecycle
+│   ├── app.py                  # composition root & lifecycle (multi-bot)
+│   ├── runtime.py              # wires one personality's conversation stack
 │   ├── cli.py                  # run / check / chat
 │   ├── config/                 # settings.py (env-driven), logging.py
-│   ├── core/                   # shared domain models & errors
+│   ├── core/                   # domain models, errors, clock, background tasks
 │   ├── ai/
 │   │   ├── providers/          # LLMProvider interface, Ollama client, factory
 │   │   ├── prompts.py          # prompt assembly
@@ -244,9 +253,11 @@ arcane/
 │   ├── memory/                 # short-term, long-term, extraction
 │   ├── database/               # SQLite connection, migrations, row models
 │   └── personalities/          # Personality schema, registry, mp3/
-├── tests/
-├── docs/
-└── data/                       # SQLite database (git-ignored)
+├── tests/                      # pytest suite (no network, no Discord needed)
+├── docs/                       # ARCHITECTURE.md, PERSONALITIES.md
+├── data/                       # SQLite database (git-ignored)
+├── Dockerfile, docker-compose.yml
+└── .github/workflows/ci.yml
 ```
 
 Design principles:
@@ -279,30 +290,38 @@ writing a persona that stays in character.
 ```bash
 pip install -r requirements-dev.txt
 
-ruff check .                 # lint
-ruff format .                # format
-python -m mypy arcane tests   # type-check (strict)
-pytest                       # tests
+ruff check .                          # lint
+ruff format .                         # format
+python -m mypy arcane tests main.py   # type-check (strict)
+pytest                                # tests
 ```
 
-Set `ARCANE_HUMANIZE=false` and `ARCANE_LOG_LEVEL=DEBUG` while iterating to remove
-delays and see every decision with its reason.
+The test suite needs neither Discord nor Ollama: it uses an in-process fake Ollama
+server, a fake transport, and spec'd discord.py mocks. It covers configuration,
+the Ollama client, the database and both memory layers, personalities, prompts,
+post-processing, the decision engine, timing, initiative, the full conversation
+pipeline, the Discord adapters, the CLI, and the application lifecycle.
 
-CI runs lint, format check, type-check, and tests on every push and pull request.
+Set `ARCANE_HUMANIZE=false` and `ARCANE_LOG_LEVEL=DEBUG` while iterating to remove
+delays and see every decision with its reason. `python main.py chat -p mp3` runs the
+real pipeline against your model without Discord.
+
+CI runs lint, format check, strict type-check, tests on Python 3.11 to 3.13, and a
+Docker build on every push and pull request.
 
 ---
 
 ## Roadmap
 
-**v0.1 — Foundation** *(in progress)*
-- [ ] Modular architecture with provider, personality, memory, and platform layers
-- [ ] mp3 personality
-- [ ] Decision engine, conversation focus, rate limiting
-- [ ] Typing indicators and human-like timing
-- [ ] Short-term memory with expiry; long-term memory framework with extraction
-- [ ] Conversation initiation in opted-in channels
-- [ ] Multiple bots per process
-- [ ] CLI (`run`, `check`, `chat`), Docker, CI
+**v0.1 — Foundation** *(current)*
+- [x] Modular architecture with provider, personality, memory, and platform layers
+- [x] mp3 personality
+- [x] Decision engine, conversation focus, rate limiting
+- [x] Typing indicators and human-like timing
+- [x] Short-term memory with expiry; long-term memory framework with extraction
+- [x] Conversation initiation in opted-in channels
+- [x] Multiple bots per process
+- [x] CLI (`run`, `check`, `chat`), Docker, CI
 
 **v0.2 — Quality of conversation**
 - [ ] Rolling conversation summaries to extend context beyond the history window
@@ -329,18 +348,45 @@ CI runs lint, format check, type-check, and tests on every push and pull request
 
 ---
 
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `Message Content Intent is not enabled` | Enable it under **Bot → Privileged Gateway Intents** in the Developer Portal. |
+| `Discord rejected the token` | Wrong or reset token in `ARCANE_BOT_<ID>_TOKEN`. |
+| Bot is online but never answers | The channel isn't in `ARCANE_ALLOWED_CHANNEL_IDS`, or the bot lacks *Send Messages* there. Run with `ARCANE_LOG_LEVEL=DEBUG` to see each decision. |
+| `AI backend 'ollama' is unavailable` | Ollama isn't running or `ARCANE_OLLAMA_BASE_URL` is wrong. Bots stay silent until it's reachable. |
+| `model '...' is not installed` | Run `ollama pull <model>`. |
+| Replies are slow | Expected with large models on modest hardware; try a smaller model, or set `ARCANE_HUMANIZE=false` to remove simulated delays. |
+| Output contains reasoning text | Use a non-reasoning model, or set `ARCANE_OLLAMA_THINK=false` for qwen3 / deepseek-r1. |
+
+`python main.py check` diagnoses most of these in one go.
+
+---
+
 ## Security & privacy
 
-- Tokens and secrets are read from the environment only and never logged. `.env`
-  is git-ignored.
-- Bots can never ping `@everyone`, `@here`, or roles.
-- Message content appears in logs only at `DEBUG` level.
+- Tokens and secrets are read from the environment only and never logged (a log
+  filter also redacts anything shaped like a Discord token). `.env` is git-ignored.
+- Bots can never ping `@everyone`, `@here`, roles, or users.
+- Message content is never written to logs; logs contain decisions, display names,
+  and channel names.
+- Bots request only the gateway intents they need (guilds, messages, message
+  content), run as an unprivileged user in Docker, and use parameterised SQL.
 - Short-term messages expire automatically and are capped per channel; messages
   deleted on Discord are deleted from storage.
 - Long-term memory stores only extracted facts, filters obvious sensitive data
-  (emails, phone numbers, secrets), and can be wiped per user.
+  (emails, phone numbers, secrets), and can be wiped per user
+  (`LongTermMemory.forget_user`; a user-facing `/forget-me` command is on the roadmap).
 - Per-channel and per-user rate limits stop mention-spam and runaway inference.
 - mp3 talks like a person in the server, but it does not claim to be human. If
   someone sincerely asks whether it is an AI, it answers honestly.
 
 All data stays on the machine running Arcane and your Ollama server.
+
+---
+
+## License
+
+No license has been chosen yet. Until one is added, all rights are reserved by the
+repository owner.

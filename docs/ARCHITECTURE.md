@@ -78,9 +78,10 @@ arcane/
 ├── main.py                     # entry point: `python main.py`
 ├── arcane/
 │   ├── app.py                  # composition root & lifecycle
+│   ├── runtime.py              # wires one personality's conversation stack
 │   ├── cli.py                  # `run`, `check`, `chat` commands
 │   ├── config/                 # settings (env-driven), logging
-│   ├── core/                   # shared domain models & errors
+│   ├── core/                   # domain models, errors, clock, background tasks
 │   ├── ai/
 │   │   ├── providers/          # LLMProvider interface + Ollama implementation
 │   │   ├── prompts.py          # prompt assembly
@@ -302,7 +303,7 @@ honest, in its own voice, if someone sincerely asks whether it is an AI.
 * Secrets come only from environment variables / `.env` (git-ignored) and are
   held as `SecretStr`; they are never logged.
 * `AllowedMentions` disables `@everyone`, `@here`, and role pings globally.
-* Message content is logged only at `DEBUG` level.
+* Message content is never logged; logs record decisions and their reasons.
 * Rate limits per channel and per user prevent mention-spam abuse and runaway
   costs.
 * Bots ignore other bots by default to prevent bot-to-bot loops.
@@ -326,4 +327,5 @@ The project is built in incremental, tested steps, each committed separately:
 9. Application bootstrap and CLI (`run`, `check`, `chat`).
 10. CI, Docker, and documentation polish.
 
-See the roadmap in the README for what comes after v0.1.
+All ten steps are complete in v0.1.0; each one is a separate commit in the
+history. See the roadmap in the README for what comes next.
