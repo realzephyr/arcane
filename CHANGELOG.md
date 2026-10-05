@@ -4,65 +4,101 @@ All notable changes to Arcane are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] - 2026-10-05
+## [0.2.0] - Unreleased
 
-Natural pacing, faster local inference, steadier conversations, and a new voice
-for mp3.
+Human pacing, chiming into active chats, faster local inference, and a new
+debate-club mp3.
 
 ### Changed
 
-- **Pacing.** The bot now reads first and types second, like a person. It
-  notices new messages (0.3-1.2 s), reads them at a human reading speed with no
-  typing indicator, and absorbs follow-ups that arrive meanwhile. The typing
-  indicator starts the moment the model starts generating, and the reply is
-  sent when someone typing at 60 wpm would be done, or as soon as generation
-  finishes if that takes longer. The fixed 2.5 s debounce, the "thinking" delay
-  and the complexity bonus (6-10 s before anything happened) are gone.
-- `TimingProfile` is speed-based: `typing_speed_wpm` (default 60) and
-  `reading_speed_wpm` replace the old characters-per-second fields;
-  `thinking_seconds`, `debounce_seconds` and `max_debounce_seconds` are removed
-  and `max_reading_seconds` is new. Personalities must be updated.
-- **Prompt layout for speed.** The system prompt is now static per channel; the
-  time, focus, memories and task travel in a short note appended to the last
+- **Pacing.** The bot reads first and types once the reply is ready. The model
+  starts drafting as soon as a message is accepted, with no typing indicator,
+  while the bot notices (0.3-1 s) and reads it (500 wpm, at most 6 s; 2 s more
+  after a bare "yo"). Only then does the typing indicator show, for 1.2 s plus
+  the reply's length at 210 wpm, so "nothing much" takes about 2 s and a
+  107-character sentence about 7 s (0.8-15 s per message). Follow-ups from the
+  same person before typing starts discard the draft and regenerate it for
+  everything they said (within 20 s, at most 3 times). The debounce, the
+  "thinking" delay and the typing indicator during generation are gone.
+- `TimingProfile` is speed-based: `typing_speed_wpm` (210), `typing_start_seconds`,
+  `reading_speed_wpm` (500), `follow_up_wait_seconds` and `max_reading_seconds`
+  replace `typing_speed_cps`, `reading_speed_cps`, `thinking_seconds`,
+  `debounce_seconds` and `max_debounce_seconds`. Personalities must be updated.
+- **Chiming in replaces quiet-channel openers.** When idle, the bot joins the
+  channel where people talked most recently: it replies to a debatable recent
+  message or posts a take on one of its topics. `InitiativeProfile` fields are
+  now `check_interval_seconds`, `idle_seconds`, `active_window_seconds`,
+  `reply_max_age_seconds`, `channel_cooldown_minutes`, `min_interval_minutes`,
+  `max_per_channel_per_day`, `chance`, `reply_chance` and `active_hours_utc`;
+  `min_quiet_minutes` and `recent_activity_hours` are removed.
+  `opener_reply_window_seconds` defaults to 180.
+- `ARCANE_INITIATIVE_CHANNEL_IDS` now **restricts** where bots chime in instead
+  of opting channels in: empty means any allowed channel, except ones whose
+  names suggest unprompted chatter is unwelcome (vent, support, mod, log,
+  rules, ...).
+- **mp3 is an 18-year-old debate-club regular** (chosen by a judge panel over
+  three drafts): argues either side, keeps score, concedes cleanly, takes debates
+  as text debates, chimes in about debate and philosophy, types short and
+  lowercase, never uses exclamation points, swears mildly, and stays family
+  friendly. The persona and the static prompt contain nothing about bots, AI
+  or code.
+- **Prompt layout for speed.** The system prompt is static per channel; time,
+  focus, memories, task and guard notes travel in a note appended to the last
   user turn, and the history window's first message stays fixed for several
-  turns. Ollama re-reads a prompt only from the first changed token, so
-  consecutive replies reuse the cached system prompt and history instead of
-  re-reading the whole conversation.
-- Memory extraction uses the same `num_ctx` as replies, so Ollama no longer
-  reloads the model between them; default `context_window` is 4096 and
-  `max_tokens` 200; default history is 16 messages.
-- **Conversation continuity.** A conversation partner's plain messages (no
-  reply, no mention) keep the conversation going. Only a Discord reply to
-  someone else or a message opening with an @mention of someone else counts as
-  "addressed elsewhere"; replying to yourself or mentioning someone in passing
-  no longer drops the bot out of the conversation.
-- Reply limits raised to 12 per user and 15 per channel per minute (the old
-  4 per user cut off normal back-and-forth); conversation timeout 10 minutes,
-  focus timeout 2 minutes.
-- Ground rules: the bot can only read and type text, declines voice calls,
-  video, games, pictures, friend requests, meetups and socials with a casual
-  excuse, makes no real-world commitments, and keeps it family friendly.
-
-- **mp3 is now a normal 18-year-old guy on the internet** (chosen by a judge
-  panel over three drafts): short lowercase messages, never an exclamation
-  point, light casual swearing, family friendly, declines voice calls, games,
-  pictures, meetups and socials with a casual excuse, honest about being a bot
-  when sincerely asked, and still into history, space and what-if arguments.
-- `keep_alive` defaults to 24h and the model is preloaded at startup with the
-  same `num_ctx` replies use.
+  turns, so Ollama reuses its cached prompt. The history budget shrinks when
+  the context window can't hold it.
+- **Ollama.** Thinking is turned off automatically for models with a thinking
+  mode (`think: "low"` where it can't be switched off); `ARCANE_OLLAMA_THINK`
+  overrides it. `keep_alive` defaults to 24h, every request uses the same
+  `num_ctx`, and the model is loaded in the background while the bots log in.
+  Defaults: `context_window` 4096, `max_tokens` 200, 16 history messages.
+- **Conversation continuity.** A partner's plain messages keep the
+  conversation going; only a Discord reply to someone else or a message
+  opening with an @mention of someone else counts as addressed elsewhere.
+  Conversation timeout 10 minutes, focus timeout 2 minutes, reply limits 12 per
+  user and 15 per channel per minute, counted per reply sent.
+- Memory extraction waits while the bot is talking and is cancelled when a
+  reply is needed (forced after 30 minutes).
 
 ### Added
 
 - `arcane/ai/guards.py`: detects 14 kinds of requests the bot can't fulfil
   (voice/video calls, streaming, games, media, friend requests, socials, phone
   calls, meetups, links, reminders, pings, reactions, server invites) and adds
-  a direct per-turn instruction to decline. Validated against 455 example
-  messages in `tests/data/guard_cases.json`.
-- Reply logs show prompt and cached token counts; a warning is logged when
-  Ollama reloads the model mid-session.
+  a per-turn instruction to decline; replies that agree anyway are regenerated
+  with a correction. `detect_debate_request` turns debate invitations into text
+  debates (vc debates are declined with a text offer), and
+  `detect_identity_question` adds a note to laugh off "are you a bot" jokes and,
+  when sincere, say briefly that it's a bot account. Validated against the cases
+  in `tests/data/guard_cases.json`.
+- Ground rules: text debates only, never step out of character to explain how
+  it works, don't claim to be a real person when seriously asked, no real-world
+  commitments, family friendly.
+- Post-processing flags implementation talk (context, training, prompt, code,
+  model) and echoes of the private note, and the reply is regenerated.
 - `StyleProfile.allow_exclamation_points`, `lowercase_starts` and
-  `blocked_patterns`.
-- `IncomingMessage.addressed_user_ids` (leading @mentions).
+  `blocked_patterns`; `IncomingMessage.addressed_user_ids` (leading @mentions).
+- Per-reply log line `read and generated in Xs (model ... took Ys, prompt N
+  tokens, M cached, attempt K), typed for Zs`; a warning when the prompt nearly
+  fills the context window and when Ollama reloads the model; the Ollama server
+  version in `python main.py check`.
+- Database migration 2: `conversations.awaiting_reply_from`.
+
+### Fixed
+
+- People's text can't forge the private note: brackets and quotes are
+  neutralised; note echoes in replies are cut.
+- Guard regexes no longer backtrack exponentially on runs of mentions (ReDoS).
+- Every Unicode exclamation glyph is removed, not just "!"; banned openers
+  match whole words only ("ah" no longer eats "ahaha").
+- Memory extraction output cut off at the token limit is salvaged instead of
+  discarded.
+- Replying to the partner refreshes their focus; the partner using the bot's
+  name is always answered; leading @mentions after filler words or emoji count
+  as addressing someone.
+- A reserved rate-limit slot closes the race where several channels passed
+  the check before any recorded a reply.
+- Model warm-up no longer delays login.
 
 ## [0.1.0] - 2026-10-05
 
