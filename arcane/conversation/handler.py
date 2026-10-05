@@ -44,7 +44,7 @@ from arcane.conversation.state import ConversationTracker
 from arcane.conversation.timing import HumanTiming
 from arcane.conversation.transport import MessageTransport, SentMessage, TransportError
 from arcane.core.clock import utcnow
-from arcane.core.models import ChannelInfo, IncomingMessage
+from arcane.core.models import ChannelInfo, HistoryMessage, IncomingMessage
 from arcane.memory.extraction import MemoryConsolidator
 from arcane.memory.long_term import LongTermMemory
 from arcane.memory.short_term import ShortTermMemory
@@ -143,6 +143,7 @@ class ConversationHandler:
 
         self._sessions: dict[int, _ChannelSession] = {}
         self._last_message_id: dict[int, int] = {}
+        self._history_anchor: dict[int, int] = {}
         self._sequence = itertools.count()
         self._stale_after = timedelta(seconds=personality.behavior.stale_trigger_seconds)
         self._closed = False
@@ -384,7 +385,12 @@ class ConversationHandler:
 
     async def _reply_context(self, target: IncomingMessage, incoming_text: str) -> PromptContext:
         memory = self._personality.memory
-        history = await self._short_term.recent_messages(target.channel_id, memory.history_messages)
+        history = self._anchored_history(
+            target.channel_id,
+            await self._short_term.recent_messages(target.channel_id, memory.max_history_messages),
+            window=memory.history_messages,
+            slack=memory.history_slack,
+        )
         state = self._tracker.get(target.channel_id)
         profile = await self._long_term.get_profile(target.author_id)
         memories = (
@@ -406,6 +412,33 @@ class ConversationHandler:
             partner_name=state.partner_name if state is not None else None,
             other_participants=state.other_participant_names() if state is not None else (),
         )
+
+    def _anchored_history(
+        self,
+        channel_id: int,
+        history: list[HistoryMessage],
+        *,
+        window: int,
+        slack: int,
+    ) -> list[HistoryMessage]:
+        """Pick the prompt history so its first message changes as rarely as possible.
+
+        Local model servers (Ollama) reuse their cache for an unchanged prompt
+        prefix. A window that slides by one message per turn changes the prefix
+        every time and forces the whole history to be re-read. Instead, the
+        window keeps its first message while it grows up to ``window + slack``
+        messages, then jumps forward to the newest ``window`` messages.
+        """
+        if not history:
+            self._history_anchor.pop(channel_id, None)
+            return history
+        ids = [message.message_id for message in history]
+        anchor = self._history_anchor.get(channel_id)
+        start = ids.index(anchor) if anchor in ids else None
+        if start is None or len(history) - start > window + slack:
+            start = max(len(history) - window, 0)
+        self._history_anchor[channel_id] = ids[start]
+        return history[start:]
 
     async def _generate_and_deliver(
         self,

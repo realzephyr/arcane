@@ -38,6 +38,7 @@ def clean(raw: str, **kwargs: object) -> list[str]:
         ("Certainly.", ["Certainly."]),  # never strip a reply down to nothing
         ("*leans back*\nhonestly no idea", ["honestly no idea"]),
         ("[2 hours later]\nmorning", ["morning"]),
+        ("[note only you can see, not part of the chat]\nyeah", ["yeah"]),
     ],
 )
 def test_cleanup(raw: str, expected: list[str]) -> None:

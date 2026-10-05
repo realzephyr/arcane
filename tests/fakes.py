@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from aiohttp import web
@@ -110,6 +111,8 @@ class FakeTransport:
         self.sent: list[tuple[int, str, int | None]] = []
         self.events: list[str] = []
         self.event_times: list[float] = []
+        self.clock: Callable[[], datetime] = utcnow
+        """Timestamps for sent messages; tests with a fake clock replace it."""
         self._ids = itertools.count(50_000)
 
     @asynccontextmanager
@@ -130,7 +133,7 @@ class FakeTransport:
         self.events.append(f"send:{content}")
         return SentMessage(
             message_id=next(self._ids),
-            created_at=utcnow(),
+            created_at=self.clock(),
             author_id=BOT_USER_ID,
             author_name="mp3",
         )

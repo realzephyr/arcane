@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import random
 from collections.abc import AsyncIterator
@@ -86,6 +87,7 @@ async def make_harness(
 
     provider = provider or ScriptedProvider("sounds about right")
     transport = transport or FakeTransport([GENERAL, OTHER_CHANNEL])
+    transport.clock = clock
     handler = build_conversation_handler(
         personality=personality,
         settings=settings or Settings(humanize=False),
@@ -128,7 +130,7 @@ async def test_prompt_includes_history_and_target(db: Database) -> None:
 
     messages, _, _ = h.provider.calls[0]
     assert "bob: i've been reading about the bronze age collapse" in messages[1].content
-    assert 'replying to alice: "mp3 what caused it?"' in messages[0].content
+    assert 'replying to alice: "mp3 what caused it?"' in messages[-1].content
 
 
 async def test_unaddressed_message_is_stored_but_ignored(db: Database) -> None:
@@ -416,8 +418,8 @@ async def test_initiative_posts_opener_once(db: Database) -> None:
 
     assert await h.handler.maybe_initiate()
     assert h.transport.texts == ["random thought: is math discovered or invented"]
-    system = h.provider.calls[0][0][0].content
-    assert "Start a new conversation about" in system
+    note = h.provider.calls[0][0][-1].content
+    assert "Start a new conversation about" in note
 
     # The last message is now ours, so it won't talk into the void again.
     assert not await h.handler.maybe_initiate()
@@ -501,6 +503,27 @@ async def test_conversation_lasts_ten_minutes_of_silence(db: Database) -> None:
     back = await h.say("ok back")
     assert back is not None and back.reason is Reason.CONTINUATION
     await h.settle()
+
+
+async def test_history_window_start_stays_stable_for_cache_reuse(db: Database) -> None:
+    window = MP3.memory.history_messages
+    h = await make_harness(db, ScriptedProvider(*[f"reply {i}" for i in range(window * 3)]))
+    await h.say("mp3 lets talk", mentions_bot=True)
+    await h.settle()
+    for i in range(window * 2):
+        h.clock.advance(seconds=5)
+        await h.say(f"message {i}")
+        await h.settle()
+
+    firsts = [call[0][1].content for call in h.provider.calls]
+    changes = sum(1 for a, b in itertools.pairwise(firsts) if a != b)
+    # Each turn adds two messages (theirs and ours). A one-message sliding window
+    # would change the first history turn on nearly every reply once full; the
+    # anchored window only jumps forward once per `slack` new messages.
+    messages_added = 2 * len(firsts)
+    assert 1 <= changes <= messages_added // MP3.memory.history_slack
+    longest = max(len(call[0]) for call in h.provider.calls)
+    assert longest <= MP3.memory.max_history_messages + 2
 
 
 async def test_close_cancels_in_flight_work(db: Database) -> None:

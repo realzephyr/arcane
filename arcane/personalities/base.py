@@ -155,7 +155,9 @@ class MemoryProfile(_Profile):
     """How much the personality remembers."""
 
     history_messages: int = Field(default=16, ge=2, le=200)
-    """Recent channel messages included in each prompt."""
+    """Recent channel messages included in each prompt. The window may grow by
+    ``history_slack`` messages before it advances, so the start of the prompt
+    stays stable for several turns and model servers can reuse their cache."""
     history_char_budget: int = Field(default=4000, ge=500)
     """Character budget for history; oldest messages are dropped first."""
     long_term_enabled: bool = True
@@ -163,6 +165,14 @@ class MemoryProfile(_Profile):
     """Long-term memories about the user included in each prompt."""
     max_memories_per_user: int = Field(default=40, ge=1)
     min_messages_for_extraction: int = Field(default=3, ge=1)
+
+    @property
+    def history_slack(self) -> int:
+        return max(self.history_messages // 2, 1)
+
+    @property
+    def max_history_messages(self) -> int:
+        return self.history_messages + self.history_slack
 
 
 class ModelProfile(_Profile):
