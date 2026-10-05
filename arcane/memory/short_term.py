@@ -153,16 +153,17 @@ class ShortTermMemory:
             """
             SELECT
                 (SELECT MAX(created_at) FROM messages
-                  WHERE bot_id = ?1 AND channel_id = ?2) AS last_at,
+                  WHERE bot_id = :bot AND channel_id = :channel) AS last_at,
                 (SELECT is_self FROM messages
-                  WHERE bot_id = ?1 AND channel_id = ?2
+                  WHERE bot_id = :bot AND channel_id = :channel
                   ORDER BY created_at DESC, message_id DESC LIMIT 1) AS last_is_self,
                 (SELECT MAX(created_at) FROM messages
-                  WHERE bot_id = ?1 AND channel_id = ?2 AND author_is_bot = 0) AS last_human_at,
+                  WHERE bot_id = :bot AND channel_id = :channel
+                    AND author_is_bot = 0) AS last_human_at,
                 (SELECT MAX(created_at) FROM messages
-                  WHERE bot_id = ?1 AND channel_id = ?2 AND is_self = 1) AS last_self_at
+                  WHERE bot_id = :bot AND channel_id = :channel AND is_self = 1) AS last_self_at
             """,
-            (self.bot_id, channel_id),
+            {"bot": self.bot_id, "channel": channel_id},
         )
         if row is None:
             return ChannelActivity()

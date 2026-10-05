@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,8 @@ from arcane.database.migrations import MIGRATIONS, Migration
 
 logger = logging.getLogger(__name__)
 
-Params = Sequence[Any]
+Params = Sequence[Any] | Mapping[str, Any]
+"""Positional (``?``) or named (``:name``) query parameters."""
 MEMORY_DATABASE = ":memory:"
 
 
