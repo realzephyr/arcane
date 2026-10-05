@@ -24,10 +24,14 @@ def _isolate_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture
 async def fake_ollama() -> AsyncIterator[tuple[FakeOllama, str]]:
     fake = FakeOllama()
+
+    async def show(request: web.Request) -> web.StreamResponse:
+        return await fake.show(request)  # looked up per request so tests can swap it
+
     app = web.Application()
     app.router.add_post("/api/chat", fake.chat)
     app.router.add_get("/api/tags", fake.tags)
-    app.router.add_post("/api/show", fake.show)
+    app.router.add_post("/api/show", show)
     app.router.add_get("/api/version", fake.version_info)
     server = TestServer(app)
     await server.start_server()

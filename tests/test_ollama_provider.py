@@ -5,6 +5,7 @@ import socket
 from typing import Any
 
 import pytest
+from aiohttp import web
 
 from arcane.ai.providers import ollama as ollama_module
 from arcane.ai.providers.base import (
@@ -303,3 +304,26 @@ async def test_health_check_reports_the_server_version(
         await provider.close()
     assert health.detail.startswith("Ollama 0.35.1: ")
     assert without.detail == "model 'llama3.1:8b' is installed"
+
+
+async def test_failed_capability_check_is_retried(fake_ollama: tuple[FakeOllama, str]) -> None:
+    fake, url = fake_ollama
+    fake.capabilities = {"qwen3:8b": {"capabilities": ["completion", "thinking"]}}
+    provider = _provider(url)
+    real_show = fake.show
+    calls = 0
+
+    async def flaky_show(request: web.Request) -> web.StreamResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return web.json_response({"error": "loading"}, status=503)
+        return await real_show(request)
+
+    fake.show = flaky_show  # type: ignore[method-assign]
+    try:
+        await provider.chat(MESSAGES, model="qwen3:8b")
+        await provider.chat(MESSAGES, model="qwen3:8b")
+    finally:
+        await provider.close()
+    assert [r.get("think") for r in fake.requests] == [None, False]

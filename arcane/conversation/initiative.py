@@ -45,17 +45,25 @@ MIN_REPLY_SCORE = 2.0
 MAX_BOT_SHARE = 0.25
 """Don't chime in where bots already wrote more than this share of recent messages."""
 MAX_COOLDOWN_DOUBLINGS = 3
-SKIPPED_CHANNEL_RE = re.compile(
-    r"vent|support|serious|rule|announce|staff|mod|admin|log|ticket|report|welcome|verify",
-    re.IGNORECASE,
-)
-"""Channel names where unprompted chatter is unwelcome; never chimed into."""
+_SKIPPED_CHANNEL_WORDS = frozenset(
+    {
+        "vent", "venting", "support", "serious", "rule", "rules", "announcement",
+        "announcements", "staff", "mod", "mods", "modlog", "moderation", "moderators",
+        "admin", "admins", "log", "logs", "ticket", "tickets", "report", "reports",
+        "welcome", "verify", "verification",
+    }
+)  # fmt: skip
+MAX_LATER_MESSAGES = 3
+"""Don't reply to a message once this many other messages came after it."""
 
 _STRONG_HOOK_RE = re.compile(
-    r"\b(?:debate|argue|argument|moral(?:ly|s|ity)?|ethic(?:s|al)?|free\s+will|god|"
-    r"conscious(?:ness)?|philosoph\w*|hot\s+take|unpopular\s+opinion|would\s+(?:you|u)\s+"
-    r"rather|wyr|meaning\s+of\s+life|is\s+it\s+(?:ever\s+)?(?:ok|okay|wrong|right)|"
-    r"right\s+or\s+wrong|overrated|underrated|goat)\b",
+    r"\b(?:debate|argue|argument|moral(?:ly|s|ity)?|ethic(?:s|al)?|free\s+will|"
+    r"conscious(?:ness)?|philosoph\w*|hot\s+take|unpopular\s+opinion|change\s+my\s+mind|"
+    r"prove\s+me\s+wrong|would\s+(?:you|u)\s+rather|wyr|meaning\s+of\s+life|"
+    r"is\s+it\s+(?:ever\s+)?(?:ok|okay|wrong|right)\s+to|right\s+or\s+wrong|determinism|"
+    r"simulation|paradox|thought\s+experiment|trolley|ship\s+of\s+theseus|existential\w*|"
+    r"nihilis\w*|stoic\w*|utilitarian\w*|does\s+god\s+exist|god\s+(?:is\s+real|exists)|"
+    r"overrated|underrated)\b",
     re.IGNORECASE,
 )
 """Signals a message is up for debate on its own."""
@@ -89,7 +97,7 @@ def discussion_score(personality: Personality, message: HistoryMessage, now: dat
     bare links or attachments, very short messages, messages aimed at someone
     (a leading @mention or a Discord reply to another person), someone venting,
     requests the bot can't fulfil, and anything without a real topical signal
-    (one of its interests or a debate term).
+    (a debate or philosophy hook; its other interests only add to the score).
     """
     text = _ATTACHMENT_RE.sub(" ", _URL_RE.sub(" ", message.content)).strip()
     words = text.split()
@@ -105,14 +113,34 @@ def discussion_score(personality: Personality, message: HistoryMessage, now: dat
         return 0.0
     interests = min(personality.interest_hits(text), 3)
     strong = min(len(_STRONG_HOOK_RE.findall(text)), 2)
-    if not interests and not strong:
-        return 0.0
+    if not strong:
+        return 0.0  # chime-ins are about debate or philosophy, not any hobby chatter
     score = 1.5 * interests + 1.5 * strong
     score += 0.5 * min(len(_WEAK_HOOK_RE.findall(text)), 2)
     score += 1.0 if "?" in text else 0.0
     score += min(len(words) / 12, 1.0)
     age_minutes = max((now - message.created_at).total_seconds(), 0.0) / 60
     return max(score - 0.3 * age_minutes, 0.0)
+
+
+def is_skipped_channel(name: str | None) -> bool:
+    """Channels where unprompted chatter is unwelcome (#vent, #mod-log, #rules...).
+
+    Whole words of the name are compared, so #logic or #theology are fine.
+    """
+    if not name:
+        return False
+    return any(word in _SKIPPED_CHANNEL_WORDS for word in re.split(r"[^a-z0-9]+", name.lower()))
+
+
+def _still_open(message: HistoryMessage, messages: Sequence[HistoryMessage]) -> bool:
+    """Not answered yet, the author hasn't moved on, and the chat hasn't either."""
+    later = [m for m in messages if m.created_at > message.created_at]
+    if any(m.reply_to_message_id == message.message_id for m in later):
+        return False
+    if any(m.author_id == message.author_id for m in later):
+        return False
+    return len(later) <= MAX_LATER_MESSAGES
 
 
 class InitiativePlanner:
@@ -222,6 +250,7 @@ class InitiativePlanner:
             and now - message.created_at <= max_age
             and (last_own is None or message.created_at > last_own)
         ]
+        candidates = [m for m in candidates if _still_open(m, messages)]
         scored = [(discussion_score(personality, m, now), m) for m in candidates]
         best = max(scored, key=lambda pair: pair[0], default=None)
         if best is None or best[0] < MIN_REPLY_SCORE:

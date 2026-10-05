@@ -137,6 +137,14 @@ _IMPLEMENTATION_RE = re.compile(
             r"\bcontext[\s-]+window\b",
             r"\bmy\s+memory\s+(?:gets?|got|is|was)\s+(?:wiped|reset|cleared|erased|truncated)\b",
             r"\bmy\s+(?:memory|context)\s+resets\b",
+            # Forgetting between conversations, the giveaway the owner quoted.
+            r"\b(?:half\s+)?my\s+memor(?:y|ies)\s+(?:is|are|gets?|got)\s+(?:gone|deleted|wiped"
+            r"|erased)\b",
+            r"\bi\s+(?:forget|don[\u2019']?t\s+remember|lose)\b[^.!?\n]{0,40}?\b(?:between|after"
+            r"|every|each)\s+(?:convos?|conversations?|chats?|sessions?)\b",
+            r"\bafter\s+all\s+these\s+(?:conversations|convos|chats)\b[^.!?\n]{0,40}?\bgone\b",
+            r"\bi[\u2019']?m\s+(?:just\s+)?(?:a\s+bunch\s+of\s+)?(?:code|lines\s+of\s+code"
+            r"|software|an?\s+program)\b",
             # Training.
             r"\bmy\s+(?:training|knowledge)\s+(?:data|set|cut-?off)\b",
             r"\bknowledge\s+cut-?off\b",
@@ -276,6 +284,7 @@ class ResponsePostProcessor:
         text = _GAP_MARKER_RE.sub("", text)
         text = _strip_markdown(text)
         text = self._strip_openers(text)
+        before_cleanup = text
         if not self._allow_exclamations:
             text = remove_exclamation_points(text)
         text = _MASS_MENTION_RE.sub(lambda m: f"@{_ZERO_WIDTH_SPACE}{m.group(1)}", text)
@@ -285,13 +294,16 @@ class ResponsePostProcessor:
         parts = split_messages(text, self._max_parts)
         if self._lowercase_starts:
             parts = [lowercase_start(part) for part in parts]
-        return ProcessedResponse(tuple(parts), issues=self._issues("\n\n".join(parts)))
+        issues = self._issues("\n\n".join(parts), before_cleanup)
+        return ProcessedResponse(tuple(parts), issues=issues)
 
     # ---------------------------------------------------------------- internals
 
-    def _issues(self, text: str) -> tuple[str, ...]:
+    def _issues(self, text: str, before_cleanup: str = "") -> tuple[str, ...]:
         issues: list[str] = []
-        if any(pattern.search(text) for pattern in self._blocked):
+        # Blocked words are checked before exclamation points are removed too, so
+        # "f!ck" can't turn into "f ck" and slip past.
+        if any(pattern.search(t) for pattern in self._blocked for t in (text, before_cleanup)):
             issues.append(ISSUE_BLOCKED)
         if mentions_private_note(text):
             issues.append(ISSUE_NOTE_ECHO)

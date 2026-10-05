@@ -425,3 +425,26 @@ def test_mp3_output_rules() -> None:
     parts = mp3.process("Yeah that's insane!!\n\nNo way!").parts
     assert parts == ("yeah that's insane", "no way")
     assert all("!" not in part for part in parts)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "why im still the same me after all these conversations when half my memory is gone",
+        "honestly i forget everything between conversations",
+        "i dont remember anything after each chat lol",
+        "im just a bunch of code",
+    ],
+)
+def test_self_talk_variants_are_flagged(reply: str) -> None:
+    assert talks_about_implementation(reply)
+
+
+def test_blocked_words_hidden_by_exclamation_points_are_caught() -> None:
+    from arcane.personalities.registry import load_personality
+
+    mp3 = load_personality("mp3")
+    style = mp3.style.model_copy(update={"blocked_patterns": (r"\bd[a!]rn\b",)})
+    processor = ResponsePostProcessor(mp3.model_copy(update={"style": style}))
+    # Exclamation removal would turn "d!rn" into "d rn", which no longer matches.
+    assert processor.process("d!rn it").blocked

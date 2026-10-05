@@ -34,8 +34,8 @@ debate-club mp3.
   `opener_reply_window_seconds` defaults to 180.
 - `ARCANE_INITIATIVE_CHANNEL_IDS` now **restricts** where bots chime in instead
   of opting channels in: empty means any allowed channel, except ones whose
-  names suggest unprompted chatter is unwelcome (vent, support, mod, log,
-  rules, ...).
+  names contain a word suggesting unprompted chatter is unwelcome (vent,
+  support, mod, log, rules, ...).
 - **mp3 is an 18-year-old debate-club regular** (chosen by a judge panel over
   three drafts): argues either side, keeps score, concedes cleanly, takes debates
   as text debates, chimes in about debate and philosophy, types short and

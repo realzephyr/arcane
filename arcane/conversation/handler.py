@@ -41,12 +41,12 @@ from typing import Any, TypeVar
 from arcane.ai.prompts import PromptContext, history_budget, history_cost
 from arcane.ai.providers.base import ProviderError
 from arcane.ai.response_manager import GeneratedReply, ResponseManager
-from arcane.conversation.decision import Decision, DecisionEngine
+from arcane.conversation.decision import Decision, DecisionEngine, Reason
 from arcane.conversation.initiative import (
     REPLY_TOPIC_PREFIX,
-    SKIPPED_CHANNEL_RE,
     InitiativeLog,
     InitiativePlanner,
+    is_skipped_channel,
 )
 from arcane.conversation.rate_limit import ReplyRateLimiter
 from arcane.conversation.state import NOBODY, ConversationState, ConversationTracker
@@ -62,6 +62,8 @@ from arcane.personalities.base import Personality
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+_ONGOING = frozenset({Reason.CONTINUATION, Reason.REPLY_TO_BOT, Reason.OPENER_REPLY})
+"""Replies in an ongoing exchange never wait for a follow-up."""
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -121,6 +123,8 @@ class _ChannelSession:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task[None] | None = None
+    deleted: set[int] = field(default_factory=set)
+    """Messages deleted while a reply to them was being written."""
 
     @property
     def busy(self) -> bool:
@@ -284,6 +288,9 @@ class ConversationHandler:
     async def handle_delete(self, message_id: int) -> None:
         for session in self._sessions.values():
             session.pending = [t for t in session.pending if t.message.message_id != message_id]
+            if session.lock.locked():
+                session.deleted.add(message_id)
+                session.wake.set()
         try:
             await self._short_term.delete_message(message_id)
         except Exception:
@@ -468,13 +475,25 @@ class ConversationHandler:
             try:
                 while True:
                     session.wake.clear()
+                    if session.deleted:
+                        batch = [t for t in batch if t.message.message_id not in session.deleted]
+                        session.deleted.clear()
+                        if not batch:
+                            logger.info(
+                                "[%s] %s deleted their message; not replying",
+                                self.bot_id,
+                                target.author_name,
+                            )
+                            return None
                     now = loop.time()
                     if regenerations < MAX_REGENERATIONS and now < absorb_until:
                         follow_ups = self._take_follow_ups(session, author)
                         if follow_ups:
                             batch = [*batch, *follow_ups]
                             regenerations += 1
-                            ready_at = max(ready_at, now + self._reading_time(follow_ups))
+                            ready_at = max(
+                                ready_at, now + self._reading_time(follow_ups, wait=False)
+                            )
                             break
                     if draft.done() and now >= ready_at:
                         return self._finish_draft(draft, batch)
@@ -493,6 +512,11 @@ class ConversationHandler:
                     draft.cancel()
                     # Never raises; a cancellation of this task itself still propagates.
                     await asyncio.wait({draft})
+                elif not draft.cancelled() and draft.exception() is not None:
+                    # A failed draft that is being replaced: its error doesn't matter now.
+                    logger.debug(
+                        "[%s] discarded a failed draft: %s", self.bot_id, draft.exception()
+                    )
             if self._closed:
                 return None
             logger.debug(
@@ -528,11 +552,13 @@ class ConversationHandler:
             return None
         return reply, batch
 
-    def _reading_time(self, triggers: list[_Trigger]) -> float:
-        """Reading time for ``triggers``, capped, plus a wait after a bare "yo"."""
+    def _reading_time(self, triggers: list[_Trigger], *, wait: bool = True) -> float:
+        """Reading time for ``triggers``, capped, plus a wait after a bare "yo mp3"."""
         text = _incoming_text(triggers)
         reading = min(self._timing.reading_time(text), self._timing.max_reading_seconds())
-        return reading + self._timing.follow_up_wait(text)
+        if not wait or all(t.decision.reason in _ONGOING for t in triggers):
+            return reading
+        return reading + self._timing.follow_up_wait(text, self._personality.names)
 
     def _warn_if_context_is_full(self, reply: GeneratedReply) -> None:
         model = self._personality.model
@@ -794,7 +820,7 @@ class ConversationHandler:
                 or (channel.parent_id is not None and channel.parent_id in restricted)
             ):
                 return None
-        elif channel.name and SKIPPED_CHANNEL_RE.search(channel.name):
+        elif is_skipped_channel(channel.name):
             return None
         return channel
 
@@ -869,6 +895,13 @@ class ConversationHandler:
             if reply is None:
                 logger.info("[%s] the model produced no usable message", self.bot_id)
                 return False
+            if session.pending or self._someone_waiting():
+                logger.info(
+                    "[%s] %s: dropped a chime-in, someone needs an answer",
+                    self.bot_id,
+                    channel.display_name,
+                )
+                return False
             if self._chat_moved_on(channel_id, seen_before, target):
                 logger.info(
                     "[%s] %s: dropped a chime-in, the chat moved on",
@@ -904,6 +937,15 @@ class ConversationHandler:
         else:
             logger.info("[%s] %s: chimed in about %s", self.bot_id, channel.display_name, topic)
         return True
+
+    def _someone_waiting(self) -> bool:
+        """A real message is queued or being answered in another channel."""
+        current = asyncio.current_task()
+        return any(
+            session.pending or (session.task is not None and not session.task.done())
+            for session in self._sessions.values()
+            if session.task is not current
+        )
 
     def _chat_moved_on(
         self, channel_id: int, seen_before: int, target: HistoryMessage | None
@@ -986,14 +1028,11 @@ class ConversationHandler:
             state, queued_at = self._to_consolidate[0]
             overdue = now - queued_at >= CONSOLIDATION_PATIENCE
             record = state.to_record(self.bot_id)
-            task: asyncio.Task[int] | None
-            if overdue:
-                task = asyncio.create_task(consolidator.consolidate(record))
-                await asyncio.wait({task})
-            elif self.engaged():
+            if self.engaged() and not overdue:
                 break
-            else:
-                task = await self._yielding(consolidator.consolidate(record))
+            # Overdue extraction no longer waits for a quiet moment, but it still
+            # gives way the moment someone needs an answer.
+            task = await self._yielding(consolidator.consolidate(record))
             if task is None:
                 break  # someone needs an answer; try again at the next maintenance run
             self._to_consolidate.pop(0)
