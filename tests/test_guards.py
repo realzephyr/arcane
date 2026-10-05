@@ -218,6 +218,12 @@ def test_identity_questions_are_detected(text: str) -> None:
         "yo @bob are you a bot",
         "do you think ai can be conscious",
         "you're right about free will",
+        "ai art is mid",
+        "is this ai generated",
+        "ur ai art is mid",
+        "is he a bot or what, he never sleeps",
+        "you are an ai art hater",
+        "that bot account got banned",
     ],
 )
 def test_identity_negatives(text: str) -> None:
@@ -226,7 +232,14 @@ def test_identity_negatives(text: str) -> None:
 
 def test_overlapping_mentions_do_not_freeze_the_guards() -> None:
     """Mention runs used to backtrack exponentially (seconds per message)."""
-    for text in ("@mp3 " + "@a." * 300, "@mp3 " + "@a, " * 200, "@x!" * 300):
+    for text in (
+        "@mp3 " + "@a." * 300,
+        "@mp3 " + "@a, " * 200,
+        "@x!" * 300,
+        "yo mp3 " + "!" * 990,
+        "mp3 " + ". " * 495,
+        "hey\n" * 250,
+    ):
         started = time.perf_counter()
         detect_impossible_request(text, names=NAMES)
         detect_identity_question(text, names=NAMES)

@@ -133,9 +133,10 @@ send
 
 1. **Notice and read.** A short reaction moment (0.3-1 s), then reading time at 500
    words per minute (at most 6 s). The model starts drafting the moment the message
-   is accepted, so it works during this phase instead of after it. A bare
-   attention-getter like "yo" or "mp3" (15 characters or less, no question mark) gets
-   an extra 2 s, because the real message usually follows.
+   is accepted, so it works during this phase instead of after it. A message that is
+   only an attention-getter ("yo", "mp3", "hey mp3 u there") gets an extra 2 s,
+   because the real message usually follows. Real messages, however short ("lol",
+   "fair point"), and replies in an ongoing conversation never wait.
 2. **Fold in follow-ups.** If the same person sends more before typing starts (within
    20 s, at most 3 times), the draft is thrown away and a new one is written for
    everything they said, so a burst gets one answer.
@@ -160,12 +161,15 @@ on its own:
   first, and skips DMs, channels where a bot spoke last, and channels where bots wrote
   more than a quarter of the last 20 messages.
 - There it either **replies** (as a Discord reply) to the most debatable recent message,
-  one that touches its interests or a debate term and isn't venting, aimed at someone
-  else, or a request it can't fulfil, or it **posts a take** of its own on one of its
+  one with a debate or philosophy hook ("hot take", "is it ever okay to", "free will",
+  ...) that nobody answered yet and the chat hasn't moved past, and that isn't
+  venting, aimed at someone else, or a request it can't fulfil, or it **posts a take** of its own on one of its
   debate or philosophy topics.
 - At most once every 8 minutes overall and every 15 minutes per channel, up to 20 times
   per channel a day, with a coin flip on top so it doesn't run like clockwork. Each
-  chime-in nobody answers doubles that channel's cooldown (up to 8 times).
+  chime-in nobody answers doubles that channel's cooldown (up to 8 times). This count
+  is kept in memory: it resets on restart and whenever the bot answers someone in
+  that channel.
 - If someone needs a real answer while it is writing, the chime-in is dropped; so is
   one the chat has moved past. Afterwards, a plain message counts as an answer only
   from the person it replied to, or, after a take of its own, from the only person
@@ -176,10 +180,10 @@ Where it may chime in:
 - `ARCANE_INITIATIVE_ENABLED=false` turns chiming in off.
 - `ARCANE_INITIATIVE_CHANNEL_IDS` **restricts** where it may chime in (threads count
   under their parent channel). When it is empty, any channel the bot may talk in is
-  fair game, except channels whose names contain `vent`, `support`, `serious`, `rule`,
-  `announce`, `staff`, `mod`, `admin`, `log`, `ticket`, `report`, `welcome` or `verify`.
-  The match is on any part of the name, so `#logic` is skipped too; list it explicitly
-  to allow it.
+  fair game, except channels whose names contain one of the words `vent`, `support`,
+  `serious`, `rules`, `announcements`, `staff`, `mod`, `admin`, `log`, `ticket`,
+  `report`, `welcome` or `verify` (whole words, so `#mod-log` is skipped but `#logic`
+  and `#theology` are not).
 
 ### Character
 
@@ -493,7 +497,8 @@ Every reply is logged like this:
   messages. A low cached count on consecutive replies means the cache is being missed.
 - **attempt 2** means the first draft was discarded (the reason is logged just before)
   and generated again, which doubles the model time.
-- **typed for** is the typing indicator time for all parts, by design.
+- **typed for** is the typing indicator time for all parts, plus the short pauses
+  between parts and the time Discord took to accept each message.
 
 A warning is logged when the prompt plus the reply nearly fill the context window
 (more than 95% of `context_window`): older messages then get cut off and the cache

@@ -168,6 +168,10 @@ class ConversationTracker:
             if previous is not None and previous.awaiting_reply_since is not None:
                 # Someone answered an opener after the conversation window lapsed.
                 state.started_at = previous.awaiting_reply_since
+            elif previous is not None and previous.participants:
+                # A timed-out conversation that maintenance hasn't collected yet:
+                # keep it for memory extraction instead of overwriting it.
+                self._retired.append(previous)
             self._conversations[message.channel_id] = state
 
         author_id, author_name = message.author_id, message.author_name

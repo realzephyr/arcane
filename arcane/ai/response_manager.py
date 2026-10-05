@@ -11,6 +11,7 @@ or a near-verbatim repeat of something the bot said recently.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -105,7 +106,7 @@ class ResponseManager:
             processed = self._postprocessor.process(result.content, other_speakers=speakers)
 
             problem = self._problem_with(processed, recent_self)
-            if problem is None and must_decline and looks_like_agreement(processed.text):
+            if problem is None and must_decline and _agrees(processed.text):
                 problem = ISSUE_AGREES
             if problem is None:
                 return GeneratedReply(
@@ -167,9 +168,20 @@ def _must_decline(context: PromptContext) -> bool:
     if context.mode == "initiate" or not context.target_message:
         return False
     names = context.personality.names
-    if detect_debate_request(context.target_message, names=names) is not None:
+    debate = detect_debate_request(context.target_message, names=names)
+    if debate is not None and not debate.voice:
         return False  # "bet, text debate" is a fine answer
-    return detect_impossible_request(context.target_message, names=names) is not None
+    return debate is not None or (
+        detect_impossible_request(context.target_message, names=names) is not None
+    )
+
+
+_OFFERS_TEXT_INSTEAD_RE = re.compile(r"\btext\b|\bin\s+(?:the\s+)?chat\b|\bright\s+here\b", re.I)
+
+
+def _agrees(reply: str) -> bool:
+    """Agrees to the impossible request (offering a text debate instead is fine)."""
+    return looks_like_agreement(reply) and _OFFERS_TEXT_INSTEAD_RE.search(reply) is None
 
 
 def _normalize(text: str) -> str:

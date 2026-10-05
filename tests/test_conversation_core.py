@@ -9,7 +9,12 @@ from datetime import timedelta
 import pytest
 
 from arcane.conversation.decision import DecisionEngine, Priority, Reason
-from arcane.conversation.initiative import InitiativeLog, InitiativePlanner, discussion_score
+from arcane.conversation.initiative import (
+    InitiativeLog,
+    InitiativePlanner,
+    discussion_score,
+    is_skipped_channel,
+)
 from arcane.conversation.rate_limit import ReplyRateLimiter, SlidingWindowCounter
 from arcane.conversation.state import ConversationState, ConversationTracker
 from arcane.conversation.timing import HumanTiming
@@ -369,9 +374,12 @@ def test_reading_scales_with_length() -> None:
 
 def test_short_attention_getters_wait_for_more() -> None:
     timing = HumanTiming(TimingProfile(follow_up_wait_seconds=2.0))
-    assert timing.follow_up_wait("yo mp3") == 2.0
-    assert timing.follow_up_wait("you up?") == 0
-    assert timing.follow_up_wait("is free will even real or not") == 0
+    names = ("mp3", "mp 3")
+    for opener in ("yo mp3", "mp3", "hey", "@mp3 u there", "yo mp 3", "mp3?"):
+        assert timing.follow_up_wait(opener, names) == 2.0, opener
+    for message in ("lol", "true", "fair point", "nah youre wrong", "wanna debate", "you up?"):
+        assert timing.follow_up_wait(message, names) == 0, message
+    assert timing.follow_up_wait("is free will even real or not", names) == 0
     assert HumanTiming(TimingProfile(), enabled=False).follow_up_wait("yo") == 0
 
 
@@ -479,11 +487,11 @@ def test_reply_target_prefers_debatable_recent_messages() -> None:
     planner = InitiativePlanner(InitiativeProfile(reply_chance=1.0), rng=FixedRandom(0.0))
     debatable = _history("honestly i think free will is fake and we just think we choose stuff")
     messages = [
-        _history("lol", minutes_ago=0.5),
-        _history("!rank", minutes_ago=0.4),
-        _history("https://youtu.be/abc", minutes_ago=0.3),
+        _history("lol", minutes_ago=1.5, author_id=BOB),
+        _history("!rank", minutes_ago=1.4, author_id=BOB),
+        _history("https://youtu.be/abc", minutes_ago=1.3, author_id=BOB),
         debatable,
-        _history("brb", minutes_ago=0.1),
+        _history("brb", minutes_ago=0.1, author_id=CAROL),
     ]
     assert planner.choose_reply_target(MP3, messages, NOW) == debatable
     assert discussion_score(MP3, _history("ok"), NOW) == 0
@@ -568,3 +576,25 @@ def test_tracker_knows_when_the_bot_is_engaged() -> None:
     state = conversations.get(GENERAL.channel_id)
     assert state is not None and state.awaiting_reply_from == BOB
     assert conversations.engaged(NOW + timedelta(minutes=7), idle_after)
+
+
+def test_skipped_channels_match_whole_words() -> None:
+    for name in ("vent", "mod-log", "server-rules", "staff_chat", "welcome", "support"):
+        assert is_skipped_channel(name), name
+    allowed: tuple[str | None, ...] = ("general", "logic", "theology", "events", "philosophy", None)
+    for fine in allowed:
+        assert not is_skipped_channel(fine), fine
+
+
+def test_reply_target_needs_a_debate_hook_and_an_open_message() -> None:
+    planner = InitiativePlanner(InitiativeProfile(reply_chance=1.0), rng=FixedRandom(0.0))
+    hobby = _history("anyone wanna play valorant ranked tonight with the squad")
+    assert planner.choose_reply_target(MP3, [hobby], NOW) is None
+    question = _history("is it ever okay to lie to protect someone?", minutes_ago=2)
+    assert planner.choose_reply_target(MP3, [question], NOW) == question
+    answered = _history(
+        "depends", minutes_ago=1, author_id=BOB, reply_to_message_id=question.message_id
+    )
+    assert planner.choose_reply_target(MP3, [question, answered], NOW) is None
+    moved_on = _history("anyway brb", minutes_ago=1)
+    assert planner.choose_reply_target(MP3, [question, moved_on], NOW) is None

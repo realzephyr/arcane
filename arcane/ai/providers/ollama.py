@@ -238,26 +238,38 @@ class OllamaProvider(LLMProvider):
             return self._settings.think
         if model in self._think:
             return self._think[model]
-        value: bool | str | None = None
         try:
             data = await self._request("POST", "/api/show", {"model": model})
         except ProviderError as exc:
-            logger.debug("Could not read the capabilities of %s: %s", model, exc)
-            data = {}
+            # Not cached: ask again next time, or a thinking model keeps thinking.
+            logger.warning(
+                "Could not check whether %s has a thinking mode (%s); will retry", model, exc
+            )
+            return None
+        value: bool | str | None = None
         capabilities = data.get("capabilities")
         if isinstance(capabilities, list) and "thinking" in capabilities:
             thinking = data.get("thinking")
             values = thinking.get("values") if isinstance(thinking, dict) else None
             if isinstance(values, list) and values and False not in values:
-                value = "low" if "low" in values else None
+                # Thinking can't be switched off: use the lightest level offered.
+                levels = [v for v in ("low", "medium", "high") if v in values]
+                value = levels[0] if levels else None
             else:
                 value = False
-            logger.info(
-                "%s has a thinking mode; %s for faster replies (set ARCANE_OLLAMA_THINK to "
-                "override)",
-                model,
-                f"using think={value!r}" if value else "turning it off",
-            )
+            if value is None:
+                logger.warning(
+                    "%s always thinks before answering, which slows replies down; consider "
+                    "a model without a thinking mode",
+                    model,
+                )
+            else:
+                logger.info(
+                    "%s has a thinking mode; %s for faster replies (set ARCANE_OLLAMA_THINK to "
+                    "override)",
+                    model,
+                    f"using think={value!r}" if value else "turning it off",
+                )
         self._think[model] = value
         return value
 

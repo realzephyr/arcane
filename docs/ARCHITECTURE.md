@@ -186,8 +186,9 @@ backoff so a slow model degrades gracefully instead of piling up requests.
 
 The Ollama provider also handles thinking models. Unless `ARCANE_OLLAMA_THINK`
 is set, it asks `/api/show` once per model: for a model with the `thinking`
-capability it sends `think: false`, or `think: "low"` when the model only offers
-thinking levels (gpt-oss style), and logs the choice. The health check reports
+capability it sends `think: false`, or the lightest level it offers ("low"
+for gpt-oss style models) when thinking can't be switched off, and logs the
+choice. A failed check is not remembered, so it is asked again next time. The health check reports
 the Ollama server version.
 
 ### 4.2 Personalities are data, not code paths
@@ -275,9 +276,11 @@ working out the answer, then type it.
 
 * **reaction** – a short moment to notice new messages (0.3-1.0 s for mp3);
 * **reading** – the length of what was received at `reading_speed_wpm` (500),
-  capped at `max_reading_seconds` (6). A bare attention-getter (15 characters
-  or less, no question mark, like "yo" or "mp3") adds `follow_up_wait_seconds`
-  (2), because the real message usually follows;
+  capped at `max_reading_seconds` (6). A message that is only an
+  attention-getter (nothing but greetings, the bot's names and mentions, like
+  "yo" or "hey mp3") adds `follow_up_wait_seconds` (2), because the real
+  message usually follows. Replies in an ongoing exchange (continuation,
+  reply to the bot, answer to a chime-in) and absorbed follow-ups never wait;
 * **generation overlaps both.** The model starts drafting as soon as the
   message is accepted, silently. The reply is used once the draft is ready and
   `ready_at = start + reaction + min(reading, max_reading) + follow_up_wait`
@@ -316,22 +319,27 @@ handler carries them out.
    most recent first. Skipped: DMs, channels outside the allow-list, channels
    with a busy session, and, when `ARCANE_INITIATIVE_CHANNEL_IDS` is set,
    channels not in it (threads count under their parent). With an empty list,
-   channels whose names contain vent, support, serious, rule, announce, staff,
-   mod, admin, log, ticket, report, welcome or verify are skipped instead
-   (`SKIPPED_CHANNEL_RE`). A channel must
+   channels whose names contain one of the words vent, support, serious,
+   rules, announcements, staff, mod, admin, log, ticket, report, welcome or
+   verify are skipped instead (`is_skipped_channel`, whole words only). A
+   channel must
    also pass `evaluate_channel`: a person spoke last (not the bot or another
    bot), bots wrote at most 25% of the last 20 messages, fewer than
    `max_per_channel_per_day` chime-ins in the last 24 hours, and the channel
    cooldown has passed. The cooldown is `channel_cooldown_minutes` doubled for
-   every chime-in in a row nobody answered (at most 8x); the count resets once
-   someone in the channel talks to the bot.
+   every chime-in in a row nobody answered (at most 8x). The count lives in
+   memory: it resets on restart and whenever the bot answers someone in the
+   channel.
 3. **Roll the dice.** Only the first eligible channel is considered, with
    probability `chance`.
 4. **Reply or post?** `choose_reply_target` scores people's messages younger
    than `reply_max_age_seconds` and newer than the bot's own last message
-   (`discussion_score`). A message needs an interest keyword or a strong debate
-   term; commands, bare links, short messages, messages led by an @mention or
-   replying to someone else, venting, and impossible requests score zero.
+   (`discussion_score`). A message needs a debate or philosophy hook (interest
+   keywords only add to the score); commands, bare links, short messages,
+   messages led by an @mention or replying to someone else, venting, and
+   impossible requests score zero. Messages someone already replied to, whose
+   author posted again, or with more than three messages after them are
+   skipped.
    Questions, debate words and freshness add to the score. With a good enough
    target the bot replies to it `reply_chance` of the time (prompt mode
    `join`, sent as a Discord reply); otherwise it posts a take on a topic from

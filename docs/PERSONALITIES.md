@@ -110,7 +110,7 @@ redone for everything they said (within 20 seconds, at most 3 times).
 | `typing_start_seconds` | 1.2 | The moment before the first keystroke, added to every message. |
 | `reading_speed_wpm` | 500 | Reading speed for incoming messages (people skim chat). |
 | `reaction_seconds` | (0.3, 1.0) | Time to notice new messages before reading them. |
-| `follow_up_wait_seconds` | 2.0 | Extra wait after a bare attention-getter ("yo", "mp3": 15 characters or less, no question mark), because the real message usually follows. |
+| `follow_up_wait_seconds` | 2.0 | Extra wait after a message that is only an attention-getter ("yo", "mp3", "hey mp3 u there"), because the real message usually follows. Never applies to replies in an ongoing exchange. |
 | `pause_between_messages_seconds` | (0.4, 1.2) | Pause between the parts of a split reply. |
 | `min_typing_seconds` / `max_typing_seconds` | 0.8 / 15 | Bounds for typing a single message, so long replies never drag. |
 | `max_reading_seconds` | 6 | Upper bound for the reading time of the messages being answered; follow-ups get their own reading time when they arrive. |
@@ -140,8 +140,8 @@ posts a message of its own about one of its `conversation_topics`. Deployments
 choose where with `ARCANE_INITIATIVE_ENABLED` and `ARCANE_INITIATIVE_CHANNEL_IDS`
 (or `ARCANE_BOT_<ID>_INITIATIVE_CHANNEL_IDS`), which restricts it to the listed
 channels; when the list is empty, any channel the bot may talk in qualifies except
-ones whose names suggest unprompted chatter is unwelcome (`vent`, `support`, `mod`,
-`log`, `rules` and similar).
+ones whose names contain a word suggesting unprompted chatter is unwelcome (`vent`,
+`support`, `mod`, `log`, `rules` and similar; whole words, so `#logic` is fine).
 
 | Field | Default | Purpose |
 |-------|---------|---------|
@@ -157,9 +157,9 @@ ones whose names suggest unprompted chatter is unwelcome (`vent`, `support`, `mo
 | `reply_chance` | 0.65 | When a recent message is worth answering, the chance of replying to it rather than posting a message of its own. |
 | `active_hours_utc` | `None` | Optional `(start, end)` hour window in UTC; may wrap midnight. |
 
-A message is worth replying to when it mentions one of the `interest_keywords` or a
-clear debate term ("hot take", "would you rather", "morally", "free will", ...) and
-isn't a command, a bare link, aimed at someone else (a leading @mention or a Discord
+A message is worth replying to when it has a clear debate or philosophy hook ("hot
+take", "would you rather", "morally", "free will", ...; `interest_keywords` only add
+to the score), nobody has answered it yet, and it isn't a command, a bare link, aimed at someone else (a leading @mention or a Discord
 reply to another person), someone venting, or a request the bot can't fulfil.
 
 It never chimes in where its own message or another bot's message is the latest,

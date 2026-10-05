@@ -642,21 +642,31 @@ def detect_debate_request(text: str, *, names: Sequence[str] = ()) -> DebateRequ
 
 # ---------------------------------------------------------- identity questions
 
-_WHAT_IT_IS = r"(?:a\s+|an\s+)?(?:bot|ai|a\.i\.?|robot|chat\s?bot|npc|chatgpt|gpt|llm|program)"
+_NOT_ABOUT_THE_BOT = (
+    r"(?!\s*(?:art|generated|gen|slop|account|accounts|fan|vacuum|written|image|images|pic|"
+    r"pics|music|voice|tools?|stuff|thing|things|model|models|company|companies|code|chat\b))"
+)
+"""Rules out "ai art", "bot account", "ai generated" and the like."""
+_WHAT_IT_IS = (
+    r"(?:a\s+|an\s+)?(?:bot|ai|a\.i\.?|robot|chat\s?bot|npc|chatgpt|gpt|llm)\b" + _NOT_ABOUT_THE_BOT
+)
 _IDENTITY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         # "are you a bot", "r u an ai", "are you even real", "are u human"
         rf"\b(?:are|r)\s+(?:you|u|ya)\s+(?:even\s+|actually\s+|really\s+|just\s+)?"
-        rf"(?:{_WHAT_IT_IS}\b|(?:real|human)\b(?=\s*(?:$|[?.,!]|or\b|rn\b|tho\b|lol|lmao|bro))|"
+        rf"(?:{_WHAT_IT_IS}|(?:real|human)\b(?=\s*(?:$|[?.,!]|or\b|rn\b|tho\b|lol|lmao|bro))|"
         r"a\s+(?:real\s+)?(?:person|human)\b)",
         # "u a bot?", "you an ai or what"
-        r"\b(?:you|u)\s+(?:a|an)\s+(?:bot|ai|robot|npc)\b",
-        # "you're a bot", "ur literally an ai", "this guy is a bot", "@bot is a bot"
-        rf"(?:\b(?:you'?re|youre|you\s+are|ur|u\s+r)|@bot\s+(?:is|iz))\s+"
-        rf"(?:literally\s+|definitely\s+|lowkey\s+|just\s+|totally\s+|so\s+)?{_WHAT_IT_IS}\b",
-        # "is this a bot", "is @bot an ai"
-        r"\bis\s+(?:this|that|it|he|@bot)\s+(?:a\s+|an\s+)?(?:bot|ai|robot|real\s+person)\b",
+        rf"\b(?:you|u)\s+(?:a|an)\s+(?:bot|ai|robot|npc)\b{_NOT_ABOUT_THE_BOT}",
+        # "you're a bot", "ur literally an ai" ("ur" needs an article: it also means "your")
+        r"\b(?:you'?re|youre|you\s+are|u\s+r)\s+(?:literally\s+|definitely\s+|lowkey\s+|"
+        rf"just\s+|totally\s+|so\s+)?{_WHAT_IT_IS}",
+        r"\bur\s+(?:literally\s+|definitely\s+|lowkey\s+|just\s+|totally\s+|so\s+)?"
+        rf"(?:a|an)\s+(?:bot|ai|robot|npc|chatbot)\b{_NOT_ABOUT_THE_BOT}",
+        # "mp3 is a bot", "is mp3 an ai", "is this a bot"
+        rf"@bot\s+(?:is|iz)\s+(?:literally\s+|definitely\s+|lowkey\s+|just\s+)?{_WHAT_IT_IS}",
+        rf"\bis\s+(?:@bot|this)\s+(?:a\s+|an\s+)?(?:bot|ai|robot|real\s+person)\b{_NOT_ABOUT_THE_BOT}",
         # "am i talking to a bot", "am i talking with a real person"
         r"\bam\s+i\s+(?:talking|speaking|chatting|texting)\s+(?:to|with)\s+"
         r"(?:a\s+|an\s+)?(?:bot|ai|robot|real\s+(?:person|human)|human|person)\b",
@@ -750,6 +760,11 @@ _AT_MENTION_RE = re.compile(r"@[^\s,:;@]+")
 _GROUP_MENTIONS = frozenset({"@bot", "@everyone", "@here"})
 
 
+_SYMBOL_RUN_KEEP = 6
+_SYMBOL_RUN_RE = re.compile(r"\W{7,}")
+MAX_SCAN_LINES = 40
+
+
 def _prepare(text: str, names: Iterable[str]) -> str:
     """Normalise ``text`` for matching and drop lines meant for someone else.
 
@@ -758,6 +773,10 @@ def _prepare(text: str, names: Iterable[str]) -> str:
     meant for them, so it is dropped.
     """
     text = text.replace("\u2019", "'")[:MAX_SCAN_CHARS]
+    # Long runs of punctuation or symbols ("!!!!...", "@@@@...") make some patterns
+    # backtrack; a few characters carry the same meaning.
+    text = _SYMBOL_RUN_RE.sub(lambda m: m.group(0)[:_SYMBOL_RUN_KEEP], text)
+    text = "\n".join(text.split("\n")[:MAX_SCAN_LINES])
     text = _normalize_names(text, names)
     if "@" not in text:
         return text
