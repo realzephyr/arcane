@@ -14,6 +14,7 @@ import pytest
 
 from arcane.ai.providers.base import LLMProvider, ProviderUnavailableError
 from arcane.config.settings import Settings
+from arcane.conversation import handler as handler_module
 from arcane.conversation.decision import Decision, Reason
 from arcane.conversation.handler import ConversationHandler
 from arcane.core.clock import utcnow
@@ -740,3 +741,19 @@ async def test_close_cancels_in_flight_work(db: Database) -> None:
 
 def test_harness_provider_type() -> None:
     assert issubclass(ScriptedProvider, LLMProvider)
+
+
+async def test_a_hanging_send_cannot_keep_it_typing(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(handler_module, "SEND_TIMEOUT_SECONDS", 0.05)
+    transport = FakeTransport([GENERAL])
+
+    async def hang(*_: object, **__: object) -> None:
+        await asyncio.Event().wait()
+
+    transport.send = hang  # type: ignore[assignment,method-assign]
+    h = await make_harness(db, transport=transport)
+    await h.say("mp3 you there", mentions_bot=True)
+    await asyncio.wait_for(h.settle(), timeout=2)
+    assert transport.events == ["typing_on", "typing_off"]

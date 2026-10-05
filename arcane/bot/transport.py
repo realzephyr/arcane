@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -20,6 +21,11 @@ SAFE_MENTIONS = discord.AllowedMentions(
 )
 """Bots never ping anyone; a reply reference is shown without notifying the author."""
 
+TYPING_REFRESH_SECONDS = 8.0
+TYPING_REQUEST_TIMEOUT_SECONDS = 5.0
+MAX_TYPING_SECONDS = 30.0
+"""Hard cap on one typing indicator, whatever happens while it is shown."""
+
 
 class DiscordTransport:
     """Typing, sending, and channel lookup through a ``discord.Client``."""
@@ -29,15 +35,37 @@ class DiscordTransport:
 
     @contextlib.asynccontextmanager
     async def typing(self, channel_id: int) -> AsyncIterator[None]:
+        """Show "is typing..." while the context is open, for at most ``MAX_TYPING_SECONDS``.
+
+        Discord shows the indicator for about 10 seconds per request, so it is
+        refreshed every ``TYPING_REFRESH_SECONDS``. The refresh stops when the
+        context closes or the cap is reached, whatever happens inside it, so the
+        indicator can never run on forever.
+        """
         channel = await self._messageable(channel_id)
-        async with contextlib.AsyncExitStack() as stack:
-            if channel is not None:
-                try:
-                    await stack.enter_async_context(channel.typing())
-                except (discord.HTTPException, discord.ClientException) as exc:
-                    # A missing typing indicator must never block the reply.
-                    logger.debug("typing indicator failed in %d: %s", channel_id, exc)
+        refresher: asyncio.Task[None] | None = None
+        if channel is not None:
+            refresher = asyncio.create_task(self._keep_typing(channel, channel_id))
+        try:
             yield
+        finally:
+            if refresher is not None:
+                refresher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await refresher
+
+    @staticmethod
+    async def _keep_typing(channel: Any, channel_id: int) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + MAX_TYPING_SECONDS
+        while loop.time() < deadline:
+            try:
+                async with asyncio.timeout(TYPING_REQUEST_TIMEOUT_SECONDS):
+                    await channel.typing()  # one request: shows the indicator ~10 s
+            except Exception as exc:
+                # A missing typing indicator must never block or break the reply.
+                logger.debug("typing indicator failed in %d: %s", channel_id, exc)
+            await asyncio.sleep(TYPING_REFRESH_SECONDS)
 
     async def send(
         self,

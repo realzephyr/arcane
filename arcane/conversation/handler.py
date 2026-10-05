@@ -75,6 +75,10 @@ MAX_STALE_CHIME_IN_MESSAGES = 2
 CONSOLIDATION_PATIENCE = timedelta(minutes=30)
 """Memory extraction gives way to live replies, but never waits longer than this."""
 CONTEXT_WARNING_RATIO = 0.95
+SEND_TIMEOUT_SECONDS = 20.0
+"""How long sending one message may take after its typing time before giving up."""
+SLOW_MODEL_SECONDS = 15.0
+"""Log a warning when the model takes longer than this to write a reply."""
 BOT_SHARE_SAMPLE = 20
 """Recent messages checked for how much of a channel is bots talking."""
 HISTORY_LOW_WATER = 0.65
@@ -453,7 +457,14 @@ class ConversationHandler:
         while True:
             target = batch[-1].message
             context = await self._reply_context(target, _incoming_text(batch))
+            logger.debug(
+                "[%s] %s: reading and drafting a reply to %s",
+                self.bot_id,
+                target.channel.display_name,
+                target.author_name,
+            )
             draft = asyncio.create_task(self._responses.generate(context))
+            watchdog = asyncio.create_task(self._warn_if_slow(draft, target))
             try:
                 while True:
                     session.wake.clear()
@@ -477,6 +488,7 @@ class ConversationHandler:
                     finally:
                         waiting.cancel()
             finally:
+                watchdog.cancel()
                 if not draft.done():
                     draft.cancel()
                     # Never raises; a cancellation of this task itself still propagates.
@@ -488,6 +500,19 @@ class ConversationHandler:
                 self.bot_id,
                 target.author_name,
                 len(batch),
+            )
+
+    async def _warn_if_slow(self, draft: asyncio.Task[Any], target: IncomingMessage) -> None:
+        await asyncio.sleep(SLOW_MODEL_SECONDS)
+        if not draft.done():
+            logger.warning(
+                "[%s] %s: the model has been writing a reply to %s for %.0fs and isn't done. "
+                "Nothing is shown in the channel meanwhile. Check that Ollama runs on the GPU "
+                "(`ollama ps`) or try a smaller model.",
+                self.bot_id,
+                target.channel.display_name,
+                target.author_name,
+                SLOW_MODEL_SECONDS,
             )
 
     def _finish_draft(
@@ -638,13 +663,25 @@ class ConversationHandler:
                 await self._sleep(self._timing.pause_between_messages())
             duration = self._timing.typing_duration(part)
             started = loop.time()
-            async with self._transport.typing(channel.channel_id):
-                # Showing the indicator is a network round trip; it counts as typing.
-                remaining = duration - (loop.time() - started)
-                if remaining > 0:
-                    await self._sleep(remaining)
-                if not await self._send(channel, part, reply_to=reply_to if index == 0 else None):
-                    break
+            try:
+                # Typing and sending one message can never take much longer than
+                # the typing itself, even if Discord hangs.
+                async with asyncio.timeout(duration + SEND_TIMEOUT_SECONDS):
+                    async with self._transport.typing(channel.channel_id):
+                        # Showing the indicator is a network round trip; it counts.
+                        remaining = duration - (loop.time() - started)
+                        if remaining > 0:
+                            await self._sleep(remaining)
+                        reference = reply_to if index == 0 else None
+                        if not await self._send(channel, part, reply_to=reference):
+                            break
+            except TimeoutError:
+                logger.warning(
+                    "[%s] %s: sending a message timed out; giving up on this reply",
+                    self.bot_id,
+                    channel.display_name,
+                )
+                break
             sent += 1
         return sent
 
