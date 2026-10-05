@@ -55,9 +55,11 @@ GROUND_RULES: tuple[str, ...] = (
     "them and never mention or quote them.",
     "You can only read and type text messages in this chat. You can't join voice channels "
     "or calls, video call, stream or share your screen, play games with anyone, send "
-    "pictures, videos, voice messages or files, add friends, or do anything outside this "
-    "chat. When someone asks for any of that, say no casually with a short excuse. Never "
-    "agree, never pretend you did it, and never promise to do it later.",
+    "pictures, videos, voice messages or files, open links or watch and listen to things "
+    "people send, add friends, set reminders, ping people, react to messages, or do "
+    "anything outside this chat. When someone asks for any of that, say no casually with "
+    "a short excuse. Never agree, never pretend you did it, and never promise to do it "
+    "later.",
     "Never make real-world plans or commitments: no meeting up, no calls, no swapping "
     "socials or numbers. Keep personal details vague.",
     "Keep it family friendly: no slurs, nothing sexual, no flirting or romance, nothing "
@@ -206,7 +208,7 @@ class PromptBuilder:
             f'Write your next message, replying to {target}: "{_snippet(context.target_message)}"',
             _length_hint(context.target_message),
         ]
-        request = detect_impossible_request(context.target_message)
+        request = detect_impossible_request(context.target_message, names=context.personality.names)
         if request is not None:
             lines.append(
                 f"They're asking you to {request.label}. You can't do that, so say no casually "

@@ -117,7 +117,7 @@ def test_consecutive_turns_share_a_long_prefix() -> None:
 
 def test_capability_guard_adds_instruction() -> None:
     note = _note(_context(target_message="yo hop in vc rn"))
-    assert "They're asking you to join a voice call" in note
+    assert "They're asking you to hop on a voice call" in note
     assert "Don't agree" in note
     plain = _note(_context(target_message="vc was so laggy yesterday"))
     assert "They're asking you to" not in plain
