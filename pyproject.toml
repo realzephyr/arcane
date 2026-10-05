@@ -98,4 +98,6 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers"
 filterwarnings = [
     "error::RuntimeWarning",
+    # discord.py imports audioop for voice support, which Arcane does not use.
+    "ignore:'audioop' is deprecated:DeprecationWarning",
 ]
