@@ -58,4 +58,4 @@ jobs:
       - name: Build image
         run: docker build --tag arcane:ci .
       - name: Smoke test
-        run: docker run --rm arcane:ci python main.py --version
+        run: docker run --rm arcane:ci --version
