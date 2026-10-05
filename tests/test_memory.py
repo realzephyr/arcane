@@ -346,3 +346,48 @@ async def test_extractor_uses_the_reply_context_window() -> None:
     reply_options = ResponseManager(mp3, provider).base_options()
     assert extraction_options is not None
     assert extraction_options.context_window == reply_options.context_window
+
+
+def _truncated_nine_memories() -> str:
+    memories = [
+        {"person": "alice" if i % 2 else "bob", "content": f"memory number {i}", "importance": 0.9}
+        for i in range(9)
+    ]
+    complete = json.dumps({"memories": memories})
+    # Cut off inside the seventh object, as the token limit would.
+    return complete[: complete.index('"memory number 6"') + 5]
+
+
+def test_truncated_output_keeps_the_complete_memories(caplog: pytest.LogCaptureFixture) -> None:
+    raw = _truncated_nine_memories()
+    with pytest.raises(ValueError):
+        json.loads(raw)
+
+    with caplog.at_level("INFO", logger="arcane.memory.extraction"):
+        candidates = parse_candidates(raw, {1: "alice", 2: "bob"}, max_per_user=9)
+
+    assert [c.content for c in candidates] == [f"memory number {i}" for i in range(6)]
+    assert any("salvaged 6" in record.getMessage() for record in caplog.records)
+
+
+def test_truncated_output_salvage_edge_cases() -> None:
+    participants = {1: "alice"}
+    item = '{"person": "alice", "content": "likes tea"}'
+    (salvaged,) = parse_candidates('{"memories": [' + item + ", {", participants)
+    assert salvaged.content == "likes tea"
+    # A bare array in a code fence, cut off mid-string.
+    assert len(parse_candidates("```json\n[" + item + ', {"person": "al', participants)) == 1
+    assert parse_candidates('{"memories": [{"person": "ali', participants) == []
+    assert parse_candidates('{"memories": [', participants) == []
+
+
+async def test_llm_extractor_asks_for_few_memories_with_room_to_finish() -> None:
+    provider = ScriptedProvider(_truncated_nine_memories())
+    extractor = LLMMemoryExtractor(provider, bot_name="mp3", max_per_user=9)
+
+    candidates = await extractor.extract([history("i study physics")], {1: "alice", 2: "bob"})
+
+    assert len(candidates) == 6
+    messages, options, _ = provider.calls[0]
+    assert options is not None and options.max_tokens == 600
+    assert "at most 3 memories per person and at most 8 in total" in messages[0].content

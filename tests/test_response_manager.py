@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from arcane.ai.postprocess import ProcessedResponse
 from arcane.ai.prompts import PromptContext
 from arcane.ai.providers.base import ProviderUnavailableError
 from arcane.ai.response_manager import ResponseManager
@@ -108,3 +109,36 @@ async def test_blocked_replies_are_regenerated_or_dropped() -> None:
 
     always_bad = ScriptedProvider("badword again")
     assert await ResponseManager(strict, always_bad).generate(_context()) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "problem"),
+    [
+        ("lol i forget stuff when half my context is gone", "talks about how it works"),
+        ("fair, not part of the chat though", "echoes its private note"),
+        ("ok\n\nWrite your next message, replying to alice", None),  # cut, not flagged
+    ],
+)
+async def test_flagged_replies_are_regenerated_with_the_reason_logged(
+    raw: str, problem: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = ScriptedProvider(raw, "kant would hate that")
+    with caplog.at_level("INFO", logger="arcane.ai.response_manager"):
+        reply = await ResponseManager(MP3, provider).generate(_context())
+
+    assert reply is not None
+    if problem is None:
+        assert reply.attempts == 1 and reply.parts == ("ok",)
+    else:
+        assert reply.attempts == 2 and reply.parts == ("kant would hate that",)
+        assert any(problem in record.getMessage() for record in caplog.records)
+
+
+def test_problem_is_the_first_issue() -> None:
+    processed = ProcessedResponse(
+        ("x",), issues=("contains a blocked pattern", "talks about how it works")
+    )
+    assert processed.blocked
+    assert ResponseManager._problem_with(processed, []) == "contains a blocked pattern"
+    assert ResponseManager._problem_with(ProcessedResponse(("fine",)), []) is None
+    assert not ProcessedResponse(("x",), issues=("talks about how it works",)).blocked

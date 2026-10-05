@@ -3,8 +3,9 @@
 :class:`ResponseManager` is the single entry point the conversation layer uses
 to get words out of a model. It builds the prompt, applies the personality's
 sampling settings, post-processes the output, and retries once when the
-result is unusable (empty after cleaning, or a near-verbatim repeat of
-something the bot said recently).
+result is unusable: empty after cleaning, flagged by the post-processor
+(blocked patterns, an echo of the private note, talk about how the bot works),
+or a near-verbatim repeat of something the bot said recently.
 """
 
 from __future__ import annotations
@@ -128,8 +129,8 @@ class ResponseManager:
     def _problem_with(processed: ProcessedResponse, recent_self: list[str]) -> str | None:
         if processed.is_empty:
             return "empty after post-processing"
-        if processed.blocked:
-            return "contains a blocked pattern"
+        if processed.issues:
+            return processed.issues[0]
         candidate = _normalize(processed.text)
         if len(candidate) < REPETITION_MIN_CHARS:
             return None
