@@ -92,6 +92,7 @@ class LLMMemoryExtractor(MemoryExtractor):
         *,
         bot_name: str,
         model: str | None = None,
+        context_window: int | None = None,
         max_per_user: int = 4,
         min_importance: float = 0.35,
         max_transcript_chars: int = 6000,
@@ -99,6 +100,9 @@ class LLMMemoryExtractor(MemoryExtractor):
         self._provider = provider
         self._bot_name = bot_name
         self._model = model
+        # Must match the reply requests' num_ctx: Ollama reloads the model whenever
+        # the context size changes between requests.
+        self._context_window = context_window
         self._max_per_user = max_per_user
         self._min_importance = min_importance
         self._max_transcript_chars = max_transcript_chars
@@ -129,7 +133,12 @@ class LLMMemoryExtractor(MemoryExtractor):
             result = await self._provider.chat(
                 messages,
                 model=self._model,
-                options=GenerationOptions(temperature=0.2, max_tokens=600, json_mode=True),
+                options=GenerationOptions(
+                    temperature=0.2,
+                    max_tokens=400,
+                    context_window=self._context_window,
+                    json_mode=True,
+                ),
             )
         except ProviderError as exc:
             logger.warning("Memory extraction failed: %s", exc)

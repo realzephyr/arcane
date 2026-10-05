@@ -12,7 +12,7 @@ from arcane.conversation.decision import DecisionEngine, Priority, Reason
 from arcane.conversation.initiative import InitiativeLog, InitiativePlanner
 from arcane.conversation.rate_limit import ReplyRateLimiter, SlidingWindowCounter
 from arcane.conversation.state import ConversationState, ConversationTracker
-from arcane.conversation.timing import HumanTiming, estimate_complexity
+from arcane.conversation.timing import HumanTiming
 from arcane.core.clock import utcnow
 from arcane.core.models import ReplyReference
 from arcane.database.database import Database
@@ -135,7 +135,9 @@ def test_partner_continuation() -> None:
 def test_partner_talking_to_someone_else_is_ignored() -> None:
     conversation = conversation_with(ALICE)
     to_bob = incoming("lol bob", reply_to=ReplyReference(message_id=5, author_name="bob"))
-    pinging_bob = incoming("look <@2>", mentioned_user_ids=frozenset({BOB}))
+    pinging_bob = incoming(
+        "@bob look", mentioned_user_ids=frozenset({BOB}), addressed_user_ids=frozenset({BOB})
+    )
     for message in (to_bob, pinging_bob):
         decision = engine().decide(message, conversation, now=NOW)
         assert decision.reason is Reason.ADDRESSED_ELSEWHERE
@@ -232,7 +234,8 @@ def test_engagement_starts_conversation_with_partner() -> None:
     state = conversations.note_engagement(incoming("hey", mentions_bot=True), NOW)
     assert state.partner_id == ALICE
     assert conversations.is_active(GENERAL.channel_id, NOW)
-    assert not conversations.is_active(GENERAL.channel_id, NOW + timedelta(minutes=10))
+    after = NOW + conversations.timeout + timedelta(seconds=1)
+    assert not conversations.is_active(GENERAL.channel_id, after)
 
 
 def test_focus_switches_only_after_partner_goes_quiet() -> None:
@@ -260,11 +263,16 @@ def test_partner_activity_keeps_focus() -> None:
 
 
 def test_opener_keeps_conversation_alive_for_reply_window() -> None:
-    conversations = tracker()
+    conversations = ConversationTracker(
+        "mp3",
+        timeout=timedelta(minutes=4),
+        focus_timeout=timedelta(minutes=2),
+        opener_window=timedelta(minutes=15),
+    )
     state = conversations.note_bot_message(GENERAL.channel_id, NOW, initiated=True)
     assert state.awaiting_reply_since == NOW
 
-    after_timeout = NOW + timedelta(seconds=MP3.behavior.conversation_timeout_seconds + 10)
+    after_timeout = NOW + timedelta(minutes=5)
     assert conversations.expire(after_timeout) == []
 
     reply = conversations.note_engagement(incoming("good question"), after_timeout)
@@ -293,18 +301,36 @@ def test_expire_returns_finished_conversations_and_restore() -> None:
 
 def test_timing_disabled_is_instant() -> None:
     timing = HumanTiming(TimingProfile(), enabled=False)
-    assert timing.response_lead_time("x" * 500) == 0
+    assert timing.reaction_delay() == 0
+    assert timing.reading_time("x" * 500) == 0
+    assert timing.max_reading_seconds() == 0
     assert timing.typing_duration("x" * 500) == 0
     assert timing.pause_between_messages() == 0
-    assert timing.debounce_window() == 0
 
 
-def test_typing_scales_with_length_and_is_clamped() -> None:
-    profile = TimingProfile(typing_speed_cps=10, variation=0.0)
+def test_typing_is_60_wpm_by_default() -> None:
+    profile = TimingProfile(variation=0.0)
+    assert profile.typing_speed_wpm == 60
+    assert profile.typing_cps == pytest.approx(5.0)  # 60 words x 5 chars per minute
     timing = HumanTiming(profile, rng=random.Random(1))
-    assert timing.typing_duration("x" * 50) == pytest.approx(5.0)
+    # 300 characters is exactly one minute of typing at 60 wpm, clamped to the max.
+    assert timing.typing_duration("x" * 100) == pytest.approx(20.0)
+    assert timing.typing_duration("lol yeah") == pytest.approx(1.6)
     assert timing.typing_duration("x") == profile.min_typing_seconds
-    assert timing.typing_duration("x" * 10_000) == profile.max_typing_seconds
+    assert timing.typing_duration("x" * 300) == profile.max_typing_seconds
+
+
+def test_typing_speed_is_configurable_in_wpm() -> None:
+    fast = HumanTiming(TimingProfile(typing_speed_wpm=120, variation=0.0))
+    assert fast.typing_duration("x" * 100) == pytest.approx(10.0)
+
+
+def test_reading_scales_with_length() -> None:
+    timing = HumanTiming(TimingProfile(reading_speed_wpm=300, variation=0.0))
+    assert timing.reading_time("x" * 250) == pytest.approx(10.0)
+    assert timing.reading_time("") == 0
+    reaction = HumanTiming(TimingProfile(reaction_seconds=(0.3, 1.2)), rng=random.Random(3))
+    assert all(0.3 <= reaction.reaction_delay() <= 1.2 for _ in range(50))
 
 
 def test_timing_has_human_variation() -> None:
@@ -312,13 +338,8 @@ def test_timing_has_human_variation() -> None:
     samples = [timing.typing_duration("a medium length message here") for _ in range(50)]
     assert statistics.pstdev(samples) > 0.1
     assert all(sample > 0 for sample in samples)
-
-
-def test_complex_messages_take_longer_to_think_about() -> None:
-    simple, deep = "lol", "why do you think free will matters morally? how would you argue it?"
-    assert estimate_complexity(simple) < estimate_complexity(deep)
-    timing = HumanTiming(TimingProfile(variation=0.0, thinking_seconds=(1.0, 1.0)))
-    assert timing.thinking_delay(deep) > timing.thinking_delay(simple)
+    # The noise is centred on the 60 wpm duration (28 chars -> 5.6 s).
+    assert 4.5 < statistics.median(samples) < 6.7
 
 
 # ---------------------------------------------------------------------- initiative

@@ -63,6 +63,11 @@ class IncomingMessage:
     mentions_bot: bool = False
     """True when the receiving bot was @mentioned (or its role was)."""
     mentioned_user_ids: frozenset[int] = field(default_factory=frozenset)
+    """Other users @mentioned anywhere in the message (the bot excluded)."""
+    addressed_user_ids: frozenset[int] = field(default_factory=frozenset)
+    """Other users the message is explicitly addressed to: @mentions at its very
+    start, as in "@bob what do you think". A mention in passing ("i told @bob")
+    does not count."""
     reply_to: ReplyReference | None = None
     attachments: tuple[str, ...] = ()
     """Short descriptions of attachments, e.g. ``"image: cat.png"``."""

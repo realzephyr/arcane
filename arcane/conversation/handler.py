@@ -8,11 +8,14 @@
    conversational focus. Rate limits count replies actually sent and are
    re-checked just before generating, so queued triggers can't exceed them.
 3. **Queue** the message on its channel's session. Each channel has at most
-   one worker task, so the bot never talks over itself, and bursts of messages
-   are debounced into a single reply.
-4. **Respond** like a person: wait to "read" and "think", show the typing
-   indicator while the model generates, keep typing for as long as a human
-   would need, send, and type each further part of a split reply.
+   one worker task, so the bot never talks over itself.
+4. **Read** like a person: notice the new messages, then take as long as a
+   human needs to read them. Follow-ups that arrive meanwhile are read too and
+   answered together. No typing indicator is shown while reading.
+5. **Respond**: the typing indicator starts exactly when the model starts
+   generating. The reply is sent once a human typing at the personality's speed
+   (60 wpm by default) would have finished, or as soon as generation finishes if
+   that takes longer. Further parts of a split reply are typed the same way.
 
 It also exposes :meth:`run_maintenance` (expiry, long-term memory
 consolidation, pruning) and :meth:`maybe_initiate` (starting conversations),
@@ -80,6 +83,8 @@ class _Trigger:
     message: IncomingMessage
     decision: Decision
     sequence: int
+    read: bool = False
+    """Whether the bot has already spent "reading" time on this message."""
 
 
 @dataclass(slots=True)
@@ -273,36 +278,46 @@ class ConversationHandler:
     async def _run_session(self, session: _ChannelSession) -> None:
         try:
             while session.pending and not self._closed:
-                waited = await self._debounce(session)
+                await self._read(session)
                 batch = self._take_batch(session)
                 if not batch:
                     continue
                 async with session.lock:
-                    await self._respond(batch, already_waited=waited)
+                    await self._respond(batch)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("[%s] response pipeline failed", self.bot_id)
             session.pending.clear()
 
-    async def _debounce(self, session: _ChannelSession) -> float:
-        """Wait until the channel has been quiet briefly. Returns seconds waited."""
-        window = self._timing.debounce_window()
-        if window <= 0:
-            return 0.0
+    async def _read(self, session: _ChannelSession) -> None:
+        """Spend human reading time on unread queued messages.
+
+        Starts with a short reaction delay, then the reading time of every unread
+        message. Messages that arrive while reading extend the phase by their own
+        reading time, so a burst is read in full and answered once. The whole
+        phase is capped by the profile's ``max_reading_seconds``.
+        """
+        unread = [t for t in session.pending if not t.read]
+        if not unread:
+            return
         loop = asyncio.get_running_loop()
         started = loop.time()
-        deadline = started + self._timing.max_debounce()
+        deadline = started + self._timing.reaction_delay()
+        cap = started + self._timing.max_reading_seconds()
         while True:
+            for trigger in session.pending:
+                if not trigger.read:
+                    trigger.read = True
+                    deadline += self._timing.reading_time(trigger.message.text_for_prompt())
             session.wake.clear()
-            timeout = min(window, deadline - loop.time())
-            if timeout <= 0:
-                break
+            remaining = min(deadline, cap) - loop.time()
+            if remaining <= 0:
+                return
             try:
-                await asyncio.wait_for(session.wake.wait(), timeout)
+                await asyncio.wait_for(session.wake.wait(), remaining)
             except TimeoutError:
-                break
-        return loop.time() - started
+                return
 
     def _take_batch(self, session: _ChannelSession) -> list[_Trigger]:
         """Pick whose messages to answer next and remove them from the queue.
@@ -332,7 +347,7 @@ class ConversationHandler:
 
     # --------------------------------------------------------------- responding
 
-    async def _respond(self, batch: list[_Trigger], *, already_waited: float) -> None:
+    async def _respond(self, batch: list[_Trigger]) -> None:
         target = batch[-1].message
         incoming_text = "\n".join(t.message.text_for_prompt() for t in batch)
 
@@ -346,10 +361,6 @@ class ConversationHandler:
                 target.author_name,
             )
             return
-
-        lead = self._timing.response_lead_time(incoming_text) - already_waited
-        if lead > 0:
-            await self._sleep(lead)
 
         context = await self._reply_context(target, incoming_text)
         reply = await self._generate_and_deliver(target.channel, context, reply_target=target)

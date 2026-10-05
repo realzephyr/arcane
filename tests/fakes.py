@@ -83,6 +83,24 @@ class GatedProvider(ScriptedProvider):
         return await super().chat(messages, model=model, options=options)
 
 
+class RecordingProvider(ScriptedProvider):
+    """A scripted provider that appends "generate" to a shared event log."""
+
+    def __init__(self, events: list[str], *replies: str | Exception) -> None:
+        super().__init__(*replies)
+        self.events = events
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        options: GenerationOptions | None = None,
+    ) -> GenerationResult:
+        self.events.append("generate")
+        return await super().chat(messages, model=model, options=options)
+
+
 class FakeTransport:
     """Records typing indicators and sent messages."""
 
@@ -91,11 +109,13 @@ class FakeTransport:
         self.fail_sends = fail_sends
         self.sent: list[tuple[int, str, int | None]] = []
         self.events: list[str] = []
+        self.event_times: list[float] = []
         self._ids = itertools.count(50_000)
 
     @asynccontextmanager
     async def typing(self, channel_id: int) -> AsyncIterator[None]:
         self.events.append("typing_on")
+        self.event_times.append(asyncio.get_running_loop().time())
         try:
             yield
         finally:

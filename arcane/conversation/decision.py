@@ -205,10 +205,19 @@ class DecisionEngine:
 
     @staticmethod
     def _addressed_elsewhere(message: IncomingMessage) -> bool:
-        """The message replies to or @mentions someone other than the bot."""
-        if message.reply_to is not None and not message.reply_to.is_self:
+        """The message is clearly meant for someone other than the bot.
+
+        That is a Discord reply to another person's message, or a message that
+        opens with an @mention of someone else. Replying to one's own message,
+        or mentioning someone in passing ("i told @bob"), does not count, so a
+        conversation partner who keeps typing normally is still followed.
+        """
+        if message.mentions_bot:
+            return False
+        reply = message.reply_to
+        if reply is not None and not reply.is_self and reply.author_id != message.author_id:
             return True
-        return bool(message.mentioned_user_ids) and not message.mentions_bot
+        return bool(message.addressed_user_ids)
 
     def _wants_to_join(
         self,

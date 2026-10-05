@@ -97,6 +97,24 @@ def test_mentions_are_read_from_content() -> None:
     assert incoming.mentioned_user_ids == frozenset({2})
 
 
+@pytest.mark.parametrize(
+    ("content", "mentions", "addressed"),
+    [
+        ("<@2> what do you think", [2], {2}),
+        ("<@!2>, <@3>: thoughts?", [2, 3], {2, 3}),
+        ("i told <@2> about it", [2], set()),
+        (f"<@{BOT_ID}> <@2> settle this", [BOT_ID, 2], {2}),
+        ("no mentions here", [], set()),
+    ],
+)
+def test_addressed_users_are_leading_mentions_only(
+    content: str, mentions: list[int], addressed: set[int]
+) -> None:
+    incoming = to_incoming(_message(content, raw_mentions=mentions), BOT_ID)
+    assert incoming.addressed_user_ids == frozenset(addressed)
+    assert BOT_ID not in incoming.mentioned_user_ids
+
+
 def test_bot_role_mention_counts_as_mention() -> None:
     incoming = to_incoming(_message("@mp3", raw_role_mentions=[555]), BOT_ID)
     assert incoming.mentions_bot

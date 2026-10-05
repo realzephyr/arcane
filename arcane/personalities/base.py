@@ -16,6 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from arcane.config.settings import PERSONALITY_ID_PATTERN
 
+CHARS_PER_WORD = 5
+"""Typing-test convention: one "word" is five characters, spaces included."""
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -34,29 +37,60 @@ class StyleProfile(_Profile):
     """How many separate Discord messages one reply may be split into."""
     banned_openers: tuple[str, ...] = ()
     """Extra phrases stripped from the start of replies (on top of the defaults)."""
+    allow_exclamation_points: bool = True
+    """When False, every exclamation point is removed from replies."""
+    lowercase_starts: bool = False
+    """When True, a capitalised first word of each message is lowercased ("Yeah" -> "yeah")."""
+    blocked_patterns: tuple[str, ...] = ()
+    """Regular expressions (case-insensitive) that must never appear in a reply. A
+    reply that matches is discarded and regenerated; if every attempt matches, the
+    bot stays silent. Use it for slurs or other terms you never want posted."""
+
+    @field_validator("blocked_patterns")
+    @classmethod
+    def _validate_patterns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in value:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"invalid blocked pattern {pattern!r}: {exc}") from exc
+        return value
 
 
 class TimingProfile(_Profile):
-    """Human-like timing. Ranges are ``(min, max)`` seconds."""
+    """Human-like pacing. Ranges are ``(min, max)`` seconds.
 
-    reading_speed_cps: float = Field(default=30.0, gt=0)
-    """Characters per second the personality reads incoming messages."""
-    typing_speed_cps: float = Field(default=7.0, gt=0)
-    """Characters per second it types (7 cps is roughly 80 wpm)."""
-    reaction_seconds: tuple[float, float] = (0.8, 3.0)
-    """Time to notice a message before reading it."""
-    thinking_seconds: tuple[float, float] = (0.5, 2.5)
-    """Base time to think before typing; complexity adds to it."""
-    pause_between_messages_seconds: tuple[float, float] = (0.6, 2.0)
-    min_typing_seconds: float = Field(default=1.2, ge=0)
-    max_typing_seconds: float = Field(default=14.0, gt=0)
-    variation: float = Field(default=0.25, ge=0, le=1)
-    """Spread of the log-normal noise applied to every duration."""
-    debounce_seconds: float = Field(default=2.5, ge=0)
-    """Wait this long for follow-up messages before answering a burst."""
-    max_debounce_seconds: float = Field(default=8.0, ge=0)
+    The bot reads first (no typing indicator), then shows the typing indicator
+    while the model generates, and sends once a human typing at
+    ``typing_speed_wpm`` would have finished. Generation time counts towards the
+    typing time, so a slow model never adds delay on top of the typing time.
+    """
 
-    @field_validator("reaction_seconds", "thinking_seconds", "pause_between_messages_seconds")
+    typing_speed_wpm: float = Field(default=60.0, gt=0, le=250)
+    """Typing speed in words per minute (one word = five characters)."""
+    reading_speed_wpm: float = Field(default=300.0, gt=0)
+    """Reading speed in words per minute for incoming messages."""
+    reaction_seconds: tuple[float, float] = (0.3, 1.2)
+    """Time to notice new messages before reading them."""
+    pause_between_messages_seconds: tuple[float, float] = (0.4, 1.2)
+    """Pause after sending one message of a split reply before typing the next."""
+    min_typing_seconds: float = Field(default=0.8, ge=0)
+    max_typing_seconds: float = Field(default=45.0, gt=0)
+    """Upper bound for typing a single message (225 characters at 60 wpm)."""
+    max_reading_seconds: float = Field(default=8.0, gt=0)
+    """Upper bound for the whole reading phase, including follow-up messages."""
+    variation: float = Field(default=0.15, ge=0, le=1)
+    """Spread of the log-normal noise applied to reading and typing times."""
+
+    @property
+    def typing_cps(self) -> float:
+        return self.typing_speed_wpm * CHARS_PER_WORD / 60
+
+    @property
+    def reading_cps(self) -> float:
+        return self.reading_speed_wpm * CHARS_PER_WORD / 60
+
+    @field_validator("reaction_seconds", "pause_between_messages_seconds")
     @classmethod
     def _validate_range(cls, value: tuple[float, float]) -> tuple[float, float]:
         low, high = value
@@ -93,9 +127,9 @@ class InitiativeProfile(_Profile):
 class BehaviorProfile(_Profile):
     """How the personality decides when to talk."""
 
-    conversation_timeout_seconds: int = Field(default=240, ge=30)
+    conversation_timeout_seconds: int = Field(default=600, ge=30)
     """Silence after which a conversation is over."""
-    focus_timeout_seconds: int = Field(default=90, ge=5)
+    focus_timeout_seconds: int = Field(default=120, ge=5)
     """How long the current partner keeps priority after their last message."""
     name_mention_reply_chance: float = Field(default=0.85, ge=0, le=1)
     """Chance to answer when its name appears in text without an @mention."""
@@ -108,8 +142,10 @@ class BehaviorProfile(_Profile):
     opener_reply_window_seconds: int = Field(default=600, ge=0)
     """After posting an opener, treat the next message within this window as a reply."""
     respond_to_bots: bool = False
-    max_replies_per_channel_per_minute: int = Field(default=6, ge=1)
-    max_replies_per_user_per_minute: int = Field(default=4, ge=1)
+    max_replies_per_channel_per_minute: int = Field(default=15, ge=1)
+    max_replies_per_user_per_minute: int = Field(default=12, ge=1)
+    """Generous enough for a fast one-on-one conversation; replies to a burst of
+    messages are batched, so spam still cannot push the bot past these."""
     stale_trigger_seconds: int = Field(default=180, ge=10)
     """Drop queued triggers older than this instead of answering late."""
     initiative: InitiativeProfile = InitiativeProfile()
@@ -118,9 +154,9 @@ class BehaviorProfile(_Profile):
 class MemoryProfile(_Profile):
     """How much the personality remembers."""
 
-    history_messages: int = Field(default=24, ge=2, le=200)
+    history_messages: int = Field(default=16, ge=2, le=200)
     """Recent channel messages included in each prompt."""
-    history_char_budget: int = Field(default=6000, ge=500)
+    history_char_budget: int = Field(default=4000, ge=500)
     """Character budget for history; oldest messages are dropped first."""
     long_term_enabled: bool = True
     recall_limit: int = Field(default=6, ge=0, le=50)
@@ -140,8 +176,11 @@ class ModelProfile(_Profile):
     top_p: float | None = Field(default=0.92, gt=0, le=1)
     top_k: int | None = Field(default=None, ge=1)
     repeat_penalty: float | None = Field(default=1.1, gt=0)
-    max_tokens: int = Field(default=320, ge=16, le=4096)
-    context_window: int | None = Field(default=8192, ge=512)
+    max_tokens: int = Field(default=200, ge=16, le=4096)
+    """Generation cap per reply. Short caps keep local models fast."""
+    context_window: int | None = Field(default=4096, ge=512)
+    """``num_ctx`` for Ollama. Every request (replies and memory extraction) uses the
+    same value, because changing it between requests makes Ollama reload the model."""
 
 
 class Personality(_Profile):

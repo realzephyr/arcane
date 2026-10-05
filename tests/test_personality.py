@@ -88,3 +88,10 @@ def test_interest_hits_handle_words_and_phrases() -> None:
     assert mp3.interest_hits("is free will compatible with physics?") == 2
     assert mp3.interest_hits("anyone up for some games tonight") == 0
     assert _minimal(interest_keywords=["Kant"]).interest_keywords == frozenset({"kant"})
+
+
+def test_invalid_blocked_pattern_is_rejected() -> None:
+    from arcane.personalities.base import StyleProfile
+
+    with pytest.raises(ValidationError, match="invalid blocked pattern"):
+        StyleProfile(blocked_patterns=("(unclosed",))

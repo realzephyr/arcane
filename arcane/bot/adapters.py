@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import discord
@@ -11,6 +12,8 @@ from arcane.core.models import ChannelInfo, IncomingMessage, ReplyReference
 MAX_REPLY_SNIPPET_CHARS = 300
 
 _CONVERSATIONAL_TYPES = frozenset({discord.MessageType.default, discord.MessageType.reply})
+_LEADING_MENTIONS_RE = re.compile(r"^\s*(?:<@!?\d+>[\s,:;-]*)+")
+_USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 
 
 def is_conversational(message: discord.Message) -> bool:
@@ -55,6 +58,7 @@ def to_incoming(message: discord.Message, bot_user_id: int) -> IncomingMessage:
     mentioned = set(message.raw_mentions)
     mentions_bot = bot_user_id in mentioned or _bot_role_mentioned(message)
     mentioned.discard(bot_user_id)
+    addressed = _leading_mentions(message.content) - {bot_user_id}
 
     return IncomingMessage(
         message_id=message.id,
@@ -67,9 +71,18 @@ def to_incoming(message: discord.Message, bot_user_id: int) -> IncomingMessage:
         is_self=message.author.id == bot_user_id,
         mentions_bot=mentions_bot,
         mentioned_user_ids=frozenset(mentioned),
+        addressed_user_ids=frozenset(addressed),
         reply_to=reply_to,
         attachments=_attachments(message),
     )
+
+
+def _leading_mentions(raw_content: str) -> set[int]:
+    """User ids @mentioned at the very start of the raw message content."""
+    match = _LEADING_MENTIONS_RE.match(raw_content)
+    if match is None:
+        return set()
+    return {int(user_id) for user_id in _USER_MENTION_RE.findall(match.group(0))}
 
 
 def _reply_reference(message: discord.Message, bot_user_id: int) -> ReplyReference | None:
