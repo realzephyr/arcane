@@ -138,15 +138,15 @@ conversation.handler.ConversationHandler.handle_message
    5. if RESPOND → enqueue on the channel's ChannelSession
    ▼
 ChannelSession (one asyncio task per channel, serialised)
-   1. debounce: wait briefly so bursts of messages are answered once
-   2. "reading" delay from timing model
-   3. typing indicator ON
-   4. ai.ResponseManager.generate(context)
+   1. read: reaction delay + reading time of unread messages; follow-ups that
+      arrive meanwhile are read too (no typing indicator)
+   2. pick whose messages to answer (priority, then the partner, then oldest)
+   3. typing indicator ON and ai.ResponseManager.generate(context) at once
         prompts.PromptBuilder → provider.chat() → postprocess
-   5. hold typing until the human-like typing time has elapsed
-   6. send part 1 (as a Discord reply only when it disambiguates)
-   7. for each further part: pause → typing → send
-   8. update conversation state & rate limiter
+   4. keep typing until a 60 wpm typist would be done (generation time counts)
+   5. send part 1 (as a Discord reply only when it disambiguates)
+   6. for each further part: pause → typing → send
+   7. update conversation state & rate limiter
 ```
 
 ### 3.2 Background loops (per bot)
@@ -214,8 +214,11 @@ Decision priorities (first match wins):
 3. Direct @mention or a reply to one of the bot's messages → respond.
 4. The bot's name used in text → respond with high probability.
 5. Active conversation:
-   * the current partner keeps talking → respond, unless the message is clearly
-     addressed to someone else;
+   * the current partner keeps talking → respond, even without a reply or a
+     mention, unless the message is clearly addressed to someone else (a Discord
+     reply to another person, or a message that opens with an @mention of
+     someone else; replying to oneself or mentioning someone in passing does
+     not count);
    * another user who isn't engaging the bot → ignore (focus on the partner).
 6. Someone answers an opener the bot posted → respond and adopt them as partner.
 7. Idle channel + message strongly matching the personality's interests →
@@ -234,19 +237,42 @@ current partner has been quiet longer than the focus timeout. This produces the
 
 ### 4.7 Human-like timing
 
-`HumanTiming` models four components, each with log-normal jitter:
+`HumanTiming` follows what a person does in a chat:
 
-* **reading** – proportional to the length of what was received;
-* **thinking** – base delay plus a complexity bonus (questions, length);
-* **typing** – proportional to the length of each outgoing message at the
-  personality's typing speed, clamped to sane bounds;
-* **inter-message pauses** – when a reply is split into several messages.
+* **reaction** – a short moment to notice new messages;
+* **reading** – proportional to the length of what was received, at the
+  personality's reading speed. No typing indicator is shown. Messages that
+  arrive while reading extend the reading phase, so a burst is answered once;
+* **typing** – the typing indicator starts at the same moment the model starts
+  generating. The reply is sent when a person typing at `typing_speed_wpm`
+  (60 by default, five characters per word) would be done, or as soon as
+  generation finishes if that takes longer;
+* **inter-message pauses** – when a reply is split into several messages, each
+  further part gets a short pause and its own typing time.
 
-Time already spent waiting for the model counts towards the typing time, so a
-slow model never adds artificial delay on top of real latency. Humanisation can
-be disabled (`ARCANE_HUMANIZE=false`) for development.
+Reading and typing times get log-normal jitter. Humanisation can be disabled
+(`ARCANE_HUMANIZE=false`) for development.
 
-### 4.8 Output post-processing
+### 4.8 Prompt layout and model caching
+
+Local inference is the slowest step, and most of its cost is reading the
+prompt. Ollama (like llama.cpp) keeps the previous prompt in its KV cache and
+only re-evaluates from the first token that differs, and its chat templates
+render every `system` message at the top of the prompt. The prompt is laid out
+around both facts:
+
+1. a **static system prompt** (personality, ground rules, server/channel/topic)
+   that is byte-identical across turns in a channel;
+2. the **history**, whose first message the handler keeps fixed for several
+   turns (`MemoryProfile.history_slack`) instead of sliding it by one message;
+3. a **turn note** (time, focus, profile, memories, task, impossible-request
+   instruction) appended to the last user turn, so it never invalidates the
+   cached prefix.
+
+Every request also uses the same `num_ctx`, memory extraction included, because
+Ollama reloads the model when the context size changes.
+
+### 4.9 Output post-processing
 
 Models drift. `ResponsePostProcessor` makes output safe and natural regardless:
 
@@ -254,11 +280,15 @@ Models drift. `ResponsePostProcessor` makes output safe and natural regardless:
 * strips speaker labels (`mp3:`, `Assistant:`) and wrapping quotes;
 * removes markdown scaffolding (headers, bold, bullet markers);
 * removes assistant clichés at the start of a reply ("Great question!");
+* applies the personality's style switches: no exclamation points, lowercase
+  message starts;
 * neutralises `@everyone`/`@here` (also blocked via `AllowedMentions`);
+* flags replies matching the personality's `blocked_patterns`, which are then
+  regenerated or dropped;
 * splits on blank lines into at most N messages and enforces Discord's
   2000-character limit at sentence boundaries.
 
-### 4.9 Memory model
+### 4.10 Memory model
 
 **Short-term memory** (`messages`, `conversations` tables)
 
@@ -283,7 +313,7 @@ Models drift. `ResponsePostProcessor` makes output safe and natural regardless:
 The extractor is a strategy (`MemoryExtractor`), so heuristic, embedding-based,
 or vector-store implementations can replace it later.
 
-### 4.10 Database
+### 4.11 Database
 
 SQLite through `aiosqlite` keeps I/O off the event loop. The connection uses
 WAL mode, foreign keys, and a busy timeout. Schema changes are versioned
@@ -291,14 +321,26 @@ migrations tracked with `PRAGMA user_version`, applied automatically at
 startup. Data access lives in the memory classes behind narrow methods, so a
 move to PostgreSQL later only touches the database layer and SQL dialect.
 
-### 4.11 Honesty
+### 4.12 Honesty, limits, and content
 
-mp3 is designed to talk like a person in a Discord server, not like a
-customer-service assistant. It does **not** claim to be human: Discord marks bot
-accounts with an APP badge, and the persona instructions tell the model to be
-honest, in its own voice, if someone sincerely asks whether it is an AI.
+mp3 plays a character: a normal 18-year-old guy hanging out in a Discord
+server, not a customer-service assistant. The framework keeps that character
+safe and honest:
 
-### 4.12 Security
+* it does **not** claim to be human when sincerely asked: Discord marks bot
+  accounts with an APP badge, and the ground rules tell the model to be honest,
+  in its own voice, if someone sincerely asks whether it is an AI;
+* it only does what a text bot can do. Requests to join a voice call, video
+  chat, play a game, send pictures, swap socials or meet up are turned down
+  with a casual excuse; it never agrees or promises to do them later. A
+  pattern-based guard adds a direct instruction whenever such a request is
+  detected;
+* it keeps personal details vague and makes no real-world commitments;
+* it is family friendly: casual swearing is a personality choice, but slurs,
+  sexual content, flirting, hate and harassment are ruled out by the ground
+  rules, and operators can add `blocked_patterns` as a hard filter.
+
+### 4.13 Security
 
 * Secrets come only from environment variables / `.env` (git-ignored) and are
   held as `SecretStr`; they are never logged.

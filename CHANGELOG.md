@@ -4,6 +4,53 @@ All notable changes to Arcane are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-05
+
+Natural pacing, faster local inference, steadier conversations, and a new voice
+for mp3.
+
+### Changed
+
+- **Pacing.** The bot now reads first and types second, like a person. It
+  notices new messages (0.3-1.2 s), reads them at a human reading speed with no
+  typing indicator, and absorbs follow-ups that arrive meanwhile. The typing
+  indicator starts the moment the model starts generating, and the reply is
+  sent when someone typing at 60 wpm would be done, or as soon as generation
+  finishes if that takes longer. The fixed 2.5 s debounce, the "thinking" delay
+  and the complexity bonus (6-10 s before anything happened) are gone.
+- `TimingProfile` is speed-based: `typing_speed_wpm` (default 60) and
+  `reading_speed_wpm` replace the old characters-per-second fields;
+  `thinking_seconds`, `debounce_seconds` and `max_debounce_seconds` are removed
+  and `max_reading_seconds` is new. Personalities must be updated.
+- **Prompt layout for speed.** The system prompt is now static per channel; the
+  time, focus, memories and task travel in a short note appended to the last
+  user turn, and the history window's first message stays fixed for several
+  turns. Ollama re-reads a prompt only from the first changed token, so
+  consecutive replies reuse the cached system prompt and history instead of
+  re-reading the whole conversation.
+- Memory extraction uses the same `num_ctx` as replies, so Ollama no longer
+  reloads the model between them; default `context_window` is 4096 and
+  `max_tokens` 200; default history is 16 messages.
+- **Conversation continuity.** A conversation partner's plain messages (no
+  reply, no mention) keep the conversation going. Only a Discord reply to
+  someone else or a message opening with an @mention of someone else counts as
+  "addressed elsewhere"; replying to yourself or mentioning someone in passing
+  no longer drops the bot out of the conversation.
+- Reply limits raised to 12 per user and 15 per channel per minute (the old
+  4 per user cut off normal back-and-forth); conversation timeout 10 minutes,
+  focus timeout 2 minutes.
+- Ground rules: the bot can only read and type text, declines voice calls,
+  video, games, pictures, friend requests, meetups and socials with a casual
+  excuse, makes no real-world commitments, and keeps it family friendly.
+
+### Added
+
+- `arcane/ai/guards.py`: detects requests the bot can't fulfil and adds a
+  direct per-turn instruction to decline.
+- `StyleProfile.allow_exclamation_points`, `lowercase_starts` and
+  `blocked_patterns`.
+- `IncomingMessage.addressed_user_ids` (leading @mentions).
+
 ## [0.1.0] - 2026-10-05
 
 First release: the foundation of the framework and the mp3 personality.

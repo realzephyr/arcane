@@ -51,6 +51,10 @@ class GenerationResult:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     duration_seconds: float = 0.0
+    cached_prompt_tokens: int | None = None
+    """Prompt tokens served from the backend's cache, when the backend reports it."""
+    load_seconds: float | None = None
+    """Time the backend spent loading the model for this request, if reported."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +133,20 @@ class LLMProvider(ABC):
 
         Must not raise for expected failures; report them in the result.
         """
+
+    async def warm_up(
+        self,
+        *,
+        model: str | None = None,
+        options: GenerationOptions | None = None,
+    ) -> bool:
+        """Load ``model`` ahead of the first real request. Returns True on success.
+
+        ``options`` must carry the same load-time settings (such as the context
+        window) the real requests will use, or the backend may reload. The
+        default implementation does nothing.
+        """
+        return True
 
     async def close(self) -> None:  # noqa: B027 - optional hook, intentionally empty
         """Release network resources. Safe to call more than once."""

@@ -144,6 +144,10 @@ class Application:
                 logger.warning("%s: %s", provider.name, health.detail)
             else:
                 logger.info("%s: %s", provider.name, health.detail)
+                # Load the model now, with the same num_ctx replies will use, so the
+                # first message isn't slowed down by a model load.
+                responses = runtime.handler.response_manager
+                await provider.warm_up(model=model, options=responses.base_options())
 
     # ----------------------------------------------------------------- running
 

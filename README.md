@@ -9,7 +9,7 @@ education, philosophy, science, history, and a good debate. The framework is bui
 that more personalities, more bot accounts, and other AI models can be added without
 touching the core.
 
-> Status: **v0.1.0 (foundation)**. Single process, local inference via Ollama, SQLite storage.
+> Status: **v0.2.0**. Single process, local inference via Ollama, SQLite storage.
 > See the [changelog](CHANGELOG.md) and the [roadmap](#roadmap).
 
 ---
@@ -36,17 +36,23 @@ touching the core.
 **Conversation**
 - Responds to @mentions, to replies to its own messages, and to its name in text.
 - Understands Discord reply chains and includes them in the model's context.
-- Keeps ongoing conversations going and prefers to stay with one partner instead of
-  hopping between users, while still answering anyone who engages it directly.
+- Keeps ongoing conversations going: once it's talking with someone, it follows
+  their plain messages too (no reply or mention needed), and it prefers to stay
+  with one partner instead of hopping between users, while still answering anyone
+  who engages it directly.
 - Occasionally joins discussions that strongly match its interests.
 - Starts conversations on its own in opted-in channels when they've been quiet,
   with daily caps so it never becomes noise.
-- Debounces bursts: three quick messages from someone get one considered answer.
+- Reads bursts in full: three quick messages from someone get one answer.
+- Turns down things a text bot can't do (voice calls, games, pictures, meetups,
+  socials) with a casual excuse instead of agreeing.
 
 **Human-like interaction**
-- Shows `mp3 is typing...` before replying.
-- Delays are modelled from reading time, thinking time (message complexity), and
-  typing time (reply length), with random human variation.
+- Reads first, types second: it takes a moment to notice and read a message (no
+  typing indicator), then shows `mp3 is typing...` while the reply is generated.
+- Types at 60 wpm: a reply arrives when a person typing at that speed would be
+  done, or as soon as the model finishes if that takes longer. Speeds are
+  configurable per personality, with natural variation.
 - Splits longer replies into separate messages with natural pauses.
 - Replies via Discord's reply feature only when it helps disambiguate.
 
@@ -54,7 +60,11 @@ touching the core.
 - Prompts combine the personality, recent conversation, relevant long-term memory,
   Discord context (server, channel, topic, time), and what it knows about the user.
 - Output is cleaned into raw Discord text: no AI labels, no markdown scaffolding,
-  no `<think>` blocks, no assistant clichés, no mass mentions.
+  no `<think>` blocks, no assistant clichés, no mass mentions. Per-personality
+  switches remove exclamation points, lowercase message starts, and block terms.
+- Prompts are laid out for Ollama's prompt cache (static system prompt, stable
+  history, per-turn note at the end), so replies don't re-read the whole
+  conversation every time.
 - Provider-agnostic AI layer; Ollama is the first backend.
 
 **Memory**
@@ -313,7 +323,7 @@ Docker build on every push and pull request.
 
 ## Roadmap
 
-**v0.1 — Foundation** *(current)*
+**v0.1 — Foundation**
 - [x] Modular architecture with provider, personality, memory, and platform layers
 - [x] mp3 personality
 - [x] Decision engine, conversation focus, rate limiting
@@ -323,20 +333,28 @@ Docker build on every push and pull request.
 - [x] Multiple bots per process
 - [x] CLI (`run`, `check`, `chat`), Docker, CI
 
-**v0.2 — Quality of conversation**
+**v0.2 — Natural pacing & voice** *(current)*
+- [x] Read-then-type pacing at 60 wpm with the typing indicator during generation
+- [x] Prompt layout that reuses Ollama's prompt cache; consistent `num_ctx`
+- [x] Conversation continuity for plain follow-up messages
+- [x] Declines impossible requests (voice calls, games, pictures, meetups)
+- [x] mp3 rewritten as a normal 18-year-old on the internet; family friendly,
+      no exclamation points
+
+**v0.3 — Quality of conversation**
 - [ ] Rolling conversation summaries to extend context beyond the history window
 - [ ] Embedding-based memory recall (semantic search over long-term memory)
 - [ ] Better addressee detection in busy group conversations
 - [ ] Image and attachment understanding via multimodal models
 - [ ] Per-guild personality tuning
 
-**v0.3 — Operations**
+**v0.4 — Operations**
 - [ ] Slash commands: `/forget-me`, `/memories`, admin controls
 - [ ] Metrics (latency, decisions, token usage) and health endpoint
 - [ ] Additional providers (OpenAI-compatible APIs, llama.cpp, Anthropic)
 - [ ] Provider fallback chains
 
-**v0.4 — Multi-personality**
+**v0.5 — Multi-personality**
 - [ ] `philosophy_bot` and `debate_bot` personalities
 - [ ] Safe bot-to-bot conversations with loop protection
 - [ ] Shared world knowledge between personalities
@@ -357,7 +375,7 @@ Docker build on every push and pull request.
 | Bot is online but never answers | The channel isn't in `ARCANE_ALLOWED_CHANNEL_IDS`, or the bot lacks *Send Messages* there. Run with `ARCANE_LOG_LEVEL=DEBUG` to see each decision. |
 | `AI backend 'ollama' is unavailable` | Ollama isn't running or `ARCANE_OLLAMA_BASE_URL` is wrong. Bots stay silent until it's reachable. |
 | `model '...' is not installed` | Run `ollama pull <model>`. |
-| Replies are slow | Expected with large models on modest hardware; try a smaller model, or set `ARCANE_HUMANIZE=false` to remove simulated delays. |
+| Replies are slow | Pacing targets 60 wpm, so a 50-character reply takes about 10 s by design. If replies take much longer than that, the model is the bottleneck: use a GPU, a smaller model (e.g. `llama3.2:3b`), keep `ARCANE_OLLAMA_KEEP_ALIVE` long so the model stays loaded, and don't raise `context_window` unnecessarily. `ARCANE_HUMANIZE=false` removes the simulated delays entirely. |
 | Output contains reasoning text | Use a non-reasoning model, or set `ARCANE_OLLAMA_THINK=false` for qwen3 / deepseek-r1. |
 
 `python main.py check` diagnoses most of these in one go.

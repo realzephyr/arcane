@@ -89,33 +89,41 @@ All values are validated at startup, so typos and out-of-range values fail fast.
 | `max_response_chars` | 900 | Hard cap for a whole reply; cut at a sentence boundary. |
 | `max_messages_per_reply` | 3 | How many Discord messages one reply may be split into. |
 | `banned_openers` | `()` | Extra phrases stripped from the start of replies (added to the defaults, such as "Great question" and "Certainly"). |
+| `allow_exclamation_points` | `True` | When `False`, every exclamation point (including emoji forms) is removed from replies. |
+| `lowercase_starts` | `False` | When `True`, a capitalised first word of each message is lowercased ("Yeah" -> "yeah"); all-caps words are kept. |
+| `blocked_patterns` | `()` | Case-insensitive regexes that must never be posted. A matching reply is regenerated; if every attempt matches, the bot stays silent. |
 
 ### `TimingProfile`: how it paces itself
 
+The bot paces itself like a person: it notices new messages, reads them (no
+typing indicator), then shows the typing indicator while the model generates
+and sends once someone typing at `typing_speed_wpm` would be done. Generation
+time counts towards the typing time, so a slow model never adds extra delay.
+Messages that arrive while it is reading are read too and answered together.
+
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `reading_speed_cps` | 30 | Characters per second it reads incoming messages. |
-| `typing_speed_cps` | 7 | Characters per second it types (about 80 wpm). |
-| `reaction_seconds` | (0.8, 3.0) | Time to notice a message. |
-| `thinking_seconds` | (0.5, 2.5) | Base thinking time; complex messages add up to 3 s. |
-| `pause_between_messages_seconds` | (0.6, 2.0) | Pause between the parts of a split reply. |
-| `min_typing_seconds` / `max_typing_seconds` | 1.2 / 14 | Bounds for any single typing period. |
-| `variation` | 0.25 | Spread of the log-normal noise applied to every duration. |
-| `debounce_seconds` / `max_debounce_seconds` | 2.5 / 8 | Wait for follow-up messages so bursts get one reply. |
+| `typing_speed_wpm` | 60 | Typing speed in words per minute (a word is 5 characters, so 60 wpm = 5 characters per second). |
+| `reading_speed_wpm` | 300 | Reading speed for incoming messages. |
+| `reaction_seconds` | (0.3, 1.2) | Time to notice new messages before reading them. |
+| `pause_between_messages_seconds` | (0.4, 1.2) | Pause between the parts of a split reply. |
+| `min_typing_seconds` / `max_typing_seconds` | 0.8 / 45 | Bounds for typing a single message (45 s is 225 characters at 60 wpm). |
+| `max_reading_seconds` | 8 | Upper bound for the reading phase, follow-ups included. |
+| `variation` | 0.15 | Spread of the log-normal noise applied to reading and typing times. |
 
 ### `BehaviorProfile`: when it talks
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `conversation_timeout_seconds` | 240 | Silence after which a conversation is over (overridable via `ARCANE_CONVERSATION_TIMEOUT_SECONDS`). |
-| `focus_timeout_seconds` | 90 | How long the current partner keeps priority after their last message. |
+| `conversation_timeout_seconds` | 600 | Silence after which a conversation is over (overridable via `ARCANE_CONVERSATION_TIMEOUT_SECONDS`). While it lasts, the partner's plain messages (no reply, no mention) are answered. |
+| `focus_timeout_seconds` | 120 | How long the current partner keeps priority after their last message. |
 | `name_mention_reply_chance` | 0.85 | Chance to answer when its name is used without an @mention. |
 | `spontaneous_reply_chance` | 0.05 | Chance to join a matching message in an idle channel. |
 | `spontaneous_min_keyword_hits` / `spontaneous_min_words` | 1 / 6 | Minimum relevance and substance for joining uninvited. |
 | `spontaneous_cooldown_seconds` | 900 | Minimum time since its last message before joining uninvited. |
 | `opener_reply_window_seconds` | 600 | After posting an opener, the next message within this window counts as a reply to it. |
 | `respond_to_bots` | `False` | Whether other bots' messages can trigger it. Leave off unless you add loop protection. |
-| `max_replies_per_channel_per_minute` / `max_replies_per_user_per_minute` | 6 / 4 | Anti-spam limits; apply even to @mentions. |
+| `max_replies_per_channel_per_minute` / `max_replies_per_user_per_minute` | 15 / 12 | Anti-spam limits on replies actually sent; they apply even to @mentions. Generous enough for a fast one-on-one conversation. |
 | `stale_trigger_seconds` | 180 | Queued messages older than this are dropped instead of answered late. |
 | `initiative` | see below | Starting conversations. |
 
@@ -142,8 +150,8 @@ own, it waits.
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `history_messages` | 24 | Recent channel messages in each prompt. |
-| `history_char_budget` | 6000 | Character budget for history; oldest messages drop first. |
+| `history_messages` | 16 | Recent channel messages in each prompt. The window may grow by half again before it advances, so the start of the prompt stays the same for several turns and Ollama can reuse its cache. |
+| `history_char_budget` | 4000 | Character budget for history; oldest messages drop first. |
 | `long_term_enabled` | `True` | Extract durable facts when conversations end. |
 | `recall_limit` | 6 | Long-term memories about the user included per prompt. |
 | `max_memories_per_user` | 40 | Cap per user; lowest-value memories are evicted. |
@@ -156,8 +164,8 @@ own, it waits.
 | `provider` | `None` | Provider name; `None` uses `ARCANE_AI_PROVIDER`. |
 | `model` | `None` | Model name; `None` uses the provider default (`ARCANE_OLLAMA_MODEL`). `ARCANE_BOT_<ID>_MODEL` overrides both. |
 | `temperature`, `top_p`, `top_k`, `repeat_penalty` | 0.85, 0.92, `None`, 1.1 | Sampling. |
-| `max_tokens` | 320 | Generation cap per reply. |
-| `context_window` | 8192 | `num_ctx` for Ollama. Raise it if you raise the history budget. |
+| `max_tokens` | 200 | Generation cap per reply. Short caps keep local models fast. |
+| `context_window` | 4096 | `num_ctx` for Ollama, used for every request (replies and memory extraction) because changing it between requests makes Ollama reload the model. Raise it if you raise the history budget. |
 
 ---
 
@@ -174,8 +182,14 @@ own, it waits.
   the bot barge into every conversation.
 * **Respect the framework's ground rules.** The prompt builder always adds rules
   that keep personas honest (they don't claim to be human when sincerely asked),
-  stop them from inventing a physical-world life, block mass pings, and resist
-  prompt injection. Don't write identities that contradict them.
+  keep them to what a text bot can do (they decline voice calls, games, pictures,
+  meetups and socials with an excuse instead of agreeing), keep them family
+  friendly, block mass pings, and resist prompt injection. Don't write identities
+  that contradict them.
+* **Let the framework handle impossible requests.** `arcane/ai/guards.py`
+  recognises common asks ("hop in vc", "send a pic", "whats your snap") and adds
+  a direct instruction to decline for that turn. Persona example lines that show
+  how the character says no help the model keep the refusal in voice.
 * **Tune with the terminal chat.** `python main.py chat -p <id>` runs the full
   pipeline (prompt, model, post-processing) without Discord. Set
   `ARCANE_LOG_LEVEL=DEBUG` to see every decision.

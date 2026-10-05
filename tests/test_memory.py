@@ -329,3 +329,20 @@ async def test_consolidator_skips_short_conversations(
     )
     assert await consolidator.consolidate(conversation) == 0
     assert provider.calls == []
+
+
+async def test_extractor_uses_the_reply_context_window() -> None:
+    """A different num_ctx makes Ollama reload the model, so they must match."""
+    from arcane.ai.response_manager import ResponseManager
+    from arcane.personalities.registry import load_personality
+
+    mp3 = load_personality("mp3")
+    provider = ScriptedProvider('{"memories": []}')
+    extractor = LLMMemoryExtractor(
+        provider, bot_name="mp3", context_window=mp3.model.context_window
+    )
+    await extractor.extract([history("i study physics")], {1: "alice"})
+    _, extraction_options, _ = provider.calls[0]
+    reply_options = ResponseManager(mp3, provider).base_options()
+    assert extraction_options is not None
+    assert extraction_options.context_window == reply_options.context_window

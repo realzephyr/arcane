@@ -269,14 +269,27 @@ def _merge_consecutive(turns: list[tuple[Role, str]]) -> list[ChatMessage]:
     return merged
 
 
+def message_cost(message: HistoryMessage) -> int:
+    """Approximate prompt characters one history message takes up."""
+    return len(message.content) + len(message.author_name) + 4
+
+
+def history_cost(messages: Sequence[HistoryMessage]) -> int:
+    return sum(message_cost(message) for message in messages)
+
+
 def _trim_to_budget(
     history: Sequence[HistoryMessage], *, max_messages: int, char_budget: int
 ) -> list[HistoryMessage]:
-    """Keep the newest messages that fit both limits, in chronological order."""
+    """Keep the newest messages that fit both limits, in chronological order.
+
+    The handler already keeps the window within budget in cache-friendly jumps;
+    this is only a safety net for callers that pass arbitrary history.
+    """
     kept: list[HistoryMessage] = []
     used = 0
     for message in reversed(history[-max_messages:]):
-        cost = len(message.content) + len(message.author_name) + 4
+        cost = message_cost(message)
         if kept and used + cost > char_budget:
             break
         kept.append(message)

@@ -526,6 +526,39 @@ async def test_history_window_start_stays_stable_for_cache_reuse(db: Database) -
     assert longest <= MP3.memory.max_history_messages + 2
 
 
+async def test_long_messages_do_not_make_the_history_slide(db: Database) -> None:
+    """With the character budget binding, the window must still move in jumps."""
+    replies = [f"reply {i} " + "y" * 300 for i in range(40)]
+    h = await make_harness(db, ScriptedProvider(*replies))
+    await h.say("mp3 essay time", mentions_bot=True)
+    await h.settle()
+    for i in range(20):
+        h.clock.advance(seconds=5)
+        await h.say(f"long message {i} " + "x" * 300)
+        await h.settle()
+
+    firsts = [call[0][1].content for call in h.provider.calls]
+    changes = sum(1 for a, b in itertools.pairwise(firsts) if a != b)
+    budget = MP3.memory.history_char_budget
+    assert 1 <= changes <= len(firsts) // 2
+    for call in h.provider.calls:
+        history_chars = sum(len(m.content) for m in call[0][1:-1])
+        assert history_chars <= budget + 400
+
+
+async def test_build_uses_a_single_leading_system_message(db: Database) -> None:
+    h = await make_harness(db)
+    await h.say("mp3 hi", mentions_bot=True)
+    await h.settle()
+    await h.say("whats up")
+    await h.settle()
+    for messages, _, _ in h.provider.calls:
+        roles = [m.role for m in messages]
+        assert roles[0] == "system"
+        assert roles.count("system") == 1
+        assert roles[-1] == "user"
+
+
 async def test_close_cancels_in_flight_work(db: Database) -> None:
     provider = GatedProvider("never sent")
     h = await make_harness(db, provider)

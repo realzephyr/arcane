@@ -65,7 +65,8 @@ class OllamaSettings(BaseSettings):
     model: str = "llama3.1:8b"
     timeout_seconds: float = Field(default=120.0, gt=0)
     connect_timeout_seconds: float = Field(default=10.0, gt=0)
-    keep_alive: str = "30m"
+    keep_alive: str = "24h"
+    """How long Ollama keeps the model loaded after a request ("-1m" = forever)."""
     max_concurrent_requests: int = Field(default=1, ge=1, le=64)
     max_retries: int = Field(default=2, ge=0, le=10)
     think: bool | None = None

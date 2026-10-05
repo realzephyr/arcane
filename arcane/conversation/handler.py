@@ -34,7 +34,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from arcane.ai.prompts import PromptContext
+from arcane.ai.prompts import PromptContext, history_cost
 from arcane.ai.providers.base import ProviderError
 from arcane.ai.response_manager import GeneratedReply, ResponseManager
 from arcane.conversation.decision import Decision, DecisionEngine
@@ -56,6 +56,9 @@ Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
 
 INITIATIVE_HISTORY_MESSAGES = 12
+HISTORY_LOW_WATER = 0.65
+"""When history exceeds its character budget, cut it down to this fraction of
+the budget in one jump, so the prompt prefix stays stable for several turns."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +154,10 @@ class ConversationHandler:
     @property
     def bot_id(self) -> str:
         return self._short_term.bot_id
+
+    @property
+    def response_manager(self) -> ResponseManager:
+        return self._responses
 
     @property
     def long_term_active(self) -> bool:
@@ -373,13 +380,16 @@ class ConversationHandler:
         self._tracker.note_bot_message(target.channel_id, now, guild_id=target.channel.guild_id)
         await self._persist_conversation(target.channel_id)
         logger.info(
-            "[%s] %s: replied to %s with %d message(s) (model %s, %.1fs, attempt %d)",
+            "[%s] %s: replied to %s with %d message(s) (model %s, generated in %.1fs, "
+            "prompt %s tokens, %s cached, attempt %d)",
             self.bot_id,
             target.channel.display_name,
             target.author_name,
             len(reply.parts),
             reply.model,
             reply.duration_seconds,
+            reply.prompt_tokens if reply.prompt_tokens is not None else "?",
+            reply.cached_prompt_tokens if reply.cached_prompt_tokens is not None else "?",
             reply.attempts,
         )
 
@@ -390,6 +400,7 @@ class ConversationHandler:
             await self._short_term.recent_messages(target.channel_id, memory.max_history_messages),
             window=memory.history_messages,
             slack=memory.history_slack,
+            char_budget=memory.history_char_budget,
         )
         state = self._tracker.get(target.channel_id)
         profile = await self._long_term.get_profile(target.author_id)
@@ -420,6 +431,7 @@ class ConversationHandler:
         *,
         window: int,
         slack: int,
+        char_budget: int,
     ) -> list[HistoryMessage]:
         """Pick the prompt history so its first message changes as rarely as possible.
 
@@ -427,7 +439,9 @@ class ConversationHandler:
         prefix. A window that slides by one message per turn changes the prefix
         every time and forces the whole history to be re-read. Instead, the
         window keeps its first message while it grows up to ``window + slack``
-        messages, then jumps forward to the newest ``window`` messages.
+        messages, then jumps forward to the newest ``window`` messages. The
+        character budget works the same way: when exceeded, the window jumps
+        forward until it is back under ``HISTORY_LOW_WATER`` of the budget.
         """
         if not history:
             self._history_anchor.pop(channel_id, None)
@@ -437,6 +451,10 @@ class ConversationHandler:
         start = ids.index(anchor) if anchor in ids else None
         if start is None or len(history) - start > window + slack:
             start = max(len(history) - window, 0)
+        if history_cost(history[start:]) > char_budget:
+            low_water = int(char_budget * HISTORY_LOW_WATER)
+            while start < len(history) - 1 and history_cost(history[start:]) > low_water:
+                start += 1
         self._history_anchor[channel_id] = ids[start]
         return history[start:]
 

@@ -153,25 +153,41 @@ class FakeOllama:
     chat_responses: list[tuple[int, Any]] = field(default_factory=list)
     models: list[str] = field(default_factory=lambda: ["llama3.1:8b", "gemma3:latest"])
     requests: list[dict[str, Any]] = field(default_factory=list)
+    loads: list[dict[str, Any]] = field(default_factory=list)
+    """Chat requests without messages, which Ollama treats as "load the model"."""
+    load_duration_ns: int = 0
     delay: float = 0.0
     in_flight: int = 0
     max_in_flight: int = 0
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
-        self.requests.append(await request.json())
+        body = await request.json()
+        if body.get("messages") == []:
+            self.loads.append(body)
+            return web.json_response(
+                {
+                    "model": body["model"],
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": "load",
+                }
+            )
+        self.requests.append(body)
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
-            status, body = (
+            status, response = (
                 self.chat_responses.pop(0)
                 if self.chat_responses
                 else (200, chat_body("default reply"))
             )
         finally:
             self.in_flight -= 1
-        return web.json_response(body, status=status)
+        if status == 200 and self.load_duration_ns and isinstance(response, dict):
+            response = {**response, "load_duration": self.load_duration_ns}
+        return web.json_response(response, status=status)
 
     async def tags(self, _request: web.Request) -> web.StreamResponse:
         return web.json_response({"models": [{"name": name} for name in self.models]})
