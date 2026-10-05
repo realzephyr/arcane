@@ -33,6 +33,7 @@ def clean(raw: str, **kwargs: object) -> list[str]:
         ("- one\n- two", ["one\ntwo"]),
         ("1. first\n2. second", ["first\nsecond"]),
         ("Great question! i think it's both", ["i think it's both"]),
+        ("Great question! **Absolutely** - plato disagrees", ["plato disagrees"]),
         ("As an AI language model, I think so", ["I think so"]),
         ("Certainly.", ["Certainly."]),  # never strip a reply down to nothing
         ("*leans back*\nhonestly no idea", ["honestly no idea"]),

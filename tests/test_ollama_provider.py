@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestServer
 
 from arcane.ai.providers import ollama as ollama_module
 from arcane.ai.providers.base import (
@@ -23,63 +19,7 @@ from arcane.ai.providers.factory import ProviderRegistry
 from arcane.ai.providers.ollama import OllamaProvider, normalize_model_name
 from arcane.config.settings import OllamaSettings, Settings
 from arcane.core.errors import ConfigurationError
-
-Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
-
-
-@dataclass
-class FakeOllama:
-    """A scripted stand-in for the Ollama HTTP API."""
-
-    chat_responses: list[tuple[int, Any]] = field(default_factory=list)
-    models: list[str] = field(default_factory=lambda: ["llama3.1:8b", "gemma3:latest"])
-    requests: list[dict[str, Any]] = field(default_factory=list)
-    delay: float = 0.0
-    in_flight: int = 0
-    max_in_flight: int = 0
-
-    async def chat(self, request: web.Request) -> web.StreamResponse:
-        self.requests.append(await request.json())
-        self.in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self.in_flight)
-        try:
-            if self.delay:
-                await asyncio.sleep(self.delay)
-            status, body = (
-                self.chat_responses.pop(0)
-                if self.chat_responses
-                else (200, _chat_body("default reply"))
-            )
-        finally:
-            self.in_flight -= 1
-        return web.json_response(body, status=status)
-
-    async def tags(self, _request: web.Request) -> web.StreamResponse:
-        return web.json_response({"models": [{"name": name} for name in self.models]})
-
-
-def _chat_body(content: str) -> dict[str, Any]:
-    return {
-        "model": "llama3.1:8b",
-        "message": {"role": "assistant", "content": content},
-        "done": True,
-        "prompt_eval_count": 42,
-        "eval_count": 7,
-    }
-
-
-@pytest.fixture
-async def fake_ollama() -> AsyncIterator[tuple[FakeOllama, str]]:
-    fake = FakeOllama()
-    app = web.Application()
-    app.router.add_post("/api/chat", fake.chat)
-    app.router.add_get("/api/tags", fake.tags)
-    server = TestServer(app)
-    await server.start_server()
-    try:
-        yield fake, str(server.make_url("")).rstrip("/")
-    finally:
-        await server.close()
+from tests.fakes import FakeOllama, chat_body
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +36,7 @@ MESSAGES = [ChatMessage("system", "be nice"), ChatMessage("user", "hi")]
 
 async def test_chat_sends_expected_payload(fake_ollama: tuple[FakeOllama, str]) -> None:
     fake, url = fake_ollama
-    fake.chat_responses.append((200, _chat_body("hey there")))
+    fake.chat_responses.append((200, chat_body("hey there")))
     provider = _provider(url, keep_alive="10m")
     try:
         result = await provider.chat(
@@ -153,7 +93,7 @@ async def test_missing_model_is_not_retried(fake_ollama: tuple[FakeOllama, str])
 async def test_server_errors_are_retried(fake_ollama: tuple[FakeOllama, str]) -> None:
     fake, url = fake_ollama
     fake.chat_responses.extend(
-        [(500, {"error": "boom"}), (503, {"error": "busy"}), (200, _chat_body("recovered"))]
+        [(500, {"error": "boom"}), (503, {"error": "busy"}), (200, chat_body("recovered"))]
     )
     provider = _provider(url, max_retries=2)
     try:

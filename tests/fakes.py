@@ -6,6 +6,10 @@ import asyncio
 import itertools
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Any
+
+from aiohttp import web
 
 from arcane.ai.providers.base import (
     ChatMessage,
@@ -117,3 +121,44 @@ class FakeTransport:
     @property
     def texts(self) -> list[str]:
         return [content for _, content, _ in self.sent]
+
+
+@dataclass
+class FakeOllama:
+    """A scripted stand-in for the Ollama HTTP API."""
+
+    chat_responses: list[tuple[int, Any]] = field(default_factory=list)
+    models: list[str] = field(default_factory=lambda: ["llama3.1:8b", "gemma3:latest"])
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    delay: float = 0.0
+    in_flight: int = 0
+    max_in_flight: int = 0
+
+    async def chat(self, request: web.Request) -> web.StreamResponse:
+        self.requests.append(await request.json())
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            status, body = (
+                self.chat_responses.pop(0)
+                if self.chat_responses
+                else (200, chat_body("default reply"))
+            )
+        finally:
+            self.in_flight -= 1
+        return web.json_response(body, status=status)
+
+    async def tags(self, _request: web.Request) -> web.StreamResponse:
+        return web.json_response({"models": [{"name": name} for name in self.models]})
+
+
+def chat_body(content: str) -> dict[str, Any]:
+    return {
+        "model": "llama3.1:8b",
+        "message": {"role": "assistant", "content": content},
+        "done": True,
+        "prompt_eval_count": 42,
+        "eval_count": 7,
+    }

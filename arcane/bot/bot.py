@@ -34,6 +34,9 @@ class ArcaneBot(discord.Client):
     """A Discord client bound to a personality; events go to an :class:`EventRouter`."""
 
     def __init__(self, personality: Personality, *, intents: discord.Intents | None = None) -> None:
+        # Arcane never joins voice; skip discord.py's warnings about voice dependencies.
+        discord.VoiceClient.warn_nacl = False
+        discord.VoiceClient.warn_dave = False
         super().__init__(
             intents=intents or default_intents(),
             allowed_mentions=SAFE_MENTIONS,

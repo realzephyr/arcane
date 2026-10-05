@@ -22,6 +22,7 @@ LOG_BACKUP_COUNT = 5
 # Discord bot tokens: base64(user id) . timestamp . HMAC
 _DISCORD_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}")
 _REDACTED = "[REDACTED]"
+_ARCANE_HANDLER = "_arcane_handler"
 
 # Third-party loggers that are too chatty at DEBUG/INFO.
 _NOISY_LOGGERS = {
@@ -56,9 +57,12 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
         numeric_level = logging.INFO
 
     root = logging.getLogger()
+    # Replace only handlers installed by a previous call; leave others (e.g. test
+    # harness or embedding application handlers) alone.
     for handler in list(root.handlers):
-        root.removeHandler(handler)
-        handler.close()
+        if getattr(handler, _ARCANE_HANDLER, False):
+            root.removeHandler(handler)
+            handler.close()
     root.setLevel(numeric_level)
 
     formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
@@ -67,6 +71,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(formatter)
     console.addFilter(redactor)
+    setattr(console, _ARCANE_HANDLER, True)
     root.addHandler(console)
 
     if log_file is not None:
@@ -79,6 +84,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
         )
         file_handler.setFormatter(formatter)
         file_handler.addFilter(redactor)
+        setattr(file_handler, _ARCANE_HANDLER, True)
         root.addHandler(file_handler)
 
     for name, minimum in _NOISY_LOGGERS.items():

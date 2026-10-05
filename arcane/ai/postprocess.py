@@ -18,6 +18,7 @@ from arcane.ai.text import strip_reasoning
 from arcane.personalities.base import Personality
 
 DISCORD_MESSAGE_LIMIT = 2000
+_MAX_CHAINED_OPENERS = 3
 _ZERO_WIDTH_SPACE = "​"
 
 DEFAULT_BANNED_OPENERS: tuple[str, ...] = (
@@ -128,8 +129,13 @@ class ResponsePostProcessor:
         return text[: match.start()]
 
     def _strip_openers(self, text: str) -> str:
-        stripped = self._opener_re.sub("", text, count=1)
-        return stripped if stripped.strip() else text
+        # Openers often come chained ("Great question! Absolutely, ...").
+        for _ in range(_MAX_CHAINED_OPENERS):
+            stripped = self._opener_re.sub("", text, count=1)
+            if stripped == text or not stripped.strip():
+                break
+            text = stripped
+        return text
 
 
 def _strip_wrapping_quotes(text: str) -> str:
