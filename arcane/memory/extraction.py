@@ -76,6 +76,7 @@ finances, passwords, or anything they asked to keep private.
 Write each memory as a short third-person statement without the person's name,
 for example "studies physics at university" or "thinks free will is an illusion".
 Rate importance from 0.0 (trivial) to 1.0 (central to who they are).
+Write at most 3 memories per person and at most 8 in total, most important first.
 
 Respond with JSON only, in exactly this shape:
 {{"memories": [{{"person": "<name exactly as listed>", "content": "<statement>", \
@@ -135,7 +136,8 @@ class LLMMemoryExtractor(MemoryExtractor):
                 model=self._model,
                 options=GenerationOptions(
                     temperature=0.2,
-                    max_tokens=400,
+                    # Room for 8 memories; a truncated reply is still salvaged.
+                    max_tokens=600,
                     context_window=self._context_window,
                     json_mode=True,
                 ),
@@ -203,13 +205,48 @@ def _load_json(raw: str) -> Any:
     try:
         return json.loads(text)
     except ValueError:
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
-            return None
+        pass
+    # Skip text around the outermost object or array; an inner object alone is useless.
+    start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
+    end = text.rfind("}" if text[start : start + 1] == "{" else "]")
+    if start != -1 and end > start:
         try:
             return json.loads(text[start : end + 1])
         except ValueError:
-            return None
+            pass
+    salvaged = _salvage_items(text)
+    if salvaged:
+        logger.info(
+            "Memory extraction output was cut off; salvaged %d complete memories", len(salvaged)
+        )
+    return salvaged
+
+
+_DECODER = json.JSONDecoder()
+
+
+def _salvage_items(text: str) -> list[Any]:
+    """Decode the complete items of a JSON array that was cut off mid-way.
+
+    Output that hits the token limit ends mid-object, so the whole document is
+    invalid even though the first memories are fine.
+    """
+    key = text.find('"memories"')
+    start = text.find("[", key if key != -1 else 0)
+    if start == -1:
+        return []
+    items: list[Any] = []
+    position = start + 1
+    while True:
+        while position < len(text) and text[position] in " \t\r\n,":
+            position += 1
+        if position >= len(text) or text[position] == "]":
+            return items
+        try:
+            item, position = _DECODER.raw_decode(text, position)
+        except ValueError:
+            return items
+        items.append(item)
 
 
 class MemoryConsolidator:

@@ -1,15 +1,31 @@
 from __future__ import annotations
 
+import sys
+import unicodedata
+from datetime import UTC, datetime
+
 import pytest
 
 from arcane.ai.postprocess import (
     DISCORD_MESSAGE_LIMIT,
+    EXCLAMATION_MARKS,
+    ISSUE_BLOCKED,
+    ISSUE_IMPLEMENTATION,
+    ISSUE_NOTE_ECHO,
+    QUESTION_EXCLAMATION_MARKS,
     ResponsePostProcessor,
+    cut_note_echo,
+    mentions_private_note,
+    remove_exclamation_points,
     split_messages,
+    talks_about_implementation,
     truncate_text,
 )
+from arcane.ai.prompts import NOTE_HEADER, PromptBuilder, PromptContext
 from arcane.ai.text import strip_reasoning
+from arcane.database.models import MemoryKind, MemoryRecord, UserProfile
 from arcane.personalities.registry import load_personality
+from tests.factories import GENERAL, history
 
 _MP3 = load_personality("mp3")
 # Generic cleanup is tested with mp3's style switches off; mp3's own rules are
@@ -123,6 +139,285 @@ def test_blocked_patterns_flag_the_reply() -> None:
     processor = _styled(blocked_patterns=(r"\bforbidden\w*",))
     assert processor.process("that word is FORBIDDEN here").blocked
     assert not processor.process("all good").blocked
+
+
+def test_blocked_patterns_are_listed_as_issues() -> None:
+    processor = _styled(blocked_patterns=(r"\bforbidden\w*",))
+    assert processor.process("FORBIDDEN").issues == (ISSUE_BLOCKED,)
+    assert processor.process("all good").issues == ()
+
+
+# ------------------------------------------------------------------ openers
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "ahaha thats so bad",
+        "ahh ok fair",
+        "ahead of you there",
+        "aha got it",
+        "as an aimbot user i disagree",
+        "absolutely not",
+        "Absolutely not, thats circular",
+        "of course not lol",
+        "certainly not",
+        "oh absolutely not",
+        "great questioning skills tbh",
+    ],
+)
+def test_openers_only_match_whole_words_and_keep_negations(raw: str) -> None:
+    assert clean(raw) == [raw]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ah, fair", "fair"),
+        ("Ah yes the trolley problem", "the trolley problem"),
+        ("Absolutely, kant is right", "kant is right"),
+        ("Of course. thats the point", "thats the point"),
+        ("As an AI, I think so", "I think so"),
+        ("absolutely nothing changes", "nothing changes"),
+    ],
+)
+def test_openers_are_still_stripped(raw: str, expected: str) -> None:
+    assert clean(raw) == [expected]
+
+
+# ------------------------------------------------------------- note echoes
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The header shares a line with the reply.
+        ("[note only you can see...] lol yeah", ["lol yeah"]),
+        ("[note only you can see, not part of the chat] lol yeah", ["lol yeah"]),
+        ("yeah fair [note only you can see...] lol yeah", ["yeah fair"]),
+        ("NOTE ONLY YOU CAN SEE, NOT PART OF THE CHAT lol", ["lol"]),
+        ("ok\n\n[note only you can see, not part of the chat]\nIt's Sunday 21:30 UTC.", ["ok"]),
+        # The header starts the reply, but what follows is the note too.
+        (
+            "[note only you can see, not part of the chat]\nIt's Sunday 21:30 UTC.\n"
+            "You're mainly talking with alice right now.\n"
+            'Write your next message, replying to alice: "hey"\nyeah fair',
+            [],
+        ),
+        # Note lines without the header.
+        ("yeah fair\nYou're mainly talking with alice right now.", ["yeah fair"]),
+        ("true. Write your next message, replying to alice: hey", ["true."]),
+        ("hm\nIt's Sunday 21:30 UTC.", ["hm"]),
+        ("hm\nYou've talked with alice before (12 exchanges).", ["hm"]),
+        ("Things you remember about alice (use naturally, don't recite):\n- likes kant", []),
+        ("Also in the conversation: bob.\nyeah", []),
+        ("lol\n\nIt's a quick message, so keep yours short too.", ["lol"]),
+        ("[note to self]\nyeah", ["yeah"]),
+    ],
+)
+def test_note_echoes_are_cut(raw: str, expected: list[str]) -> None:
+    assert clean(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "its sunday, nobody is online",
+        "i'll note that for later",
+        "only you can see it that way",
+        "write your essay first",
+        "[1] is the source",
+    ],
+)
+def test_ordinary_text_is_not_a_note_echo(raw: str) -> None:
+    response = PROCESSOR.process(raw)
+    assert response.parts == (raw,)
+    assert response.issues == ()
+
+
+def test_real_note_lines_are_recognised() -> None:
+    """Keeps the cut patterns in step with what PromptBuilder actually writes."""
+    now = datetime(2026, 10, 4, 21, 30, tzinfo=UTC)
+    profile = UserProfile("mp3", 1, "alice", now, now, interaction_count=12)
+    memory = MemoryRecord(1, "mp3", 1, MemoryKind.FACT, "studies classics", 0.8, now, now)
+    contexts = [
+        PromptContext(
+            personality=_MP3,
+            channel=GENERAL,
+            history=[history("hey mp3, thoughts on kant?")],
+            now=now,
+            target_user_name="alice",
+            target_message=message,
+            profile=profile,
+            memories=[memory],
+            partner_name="alice",
+            other_participants=["alice", "bob"],
+        )
+        for message in ("hey", "what do you think about kant and the categorical imperative?")
+    ]
+    for context in contexts:
+        note = PromptBuilder().turn_note(context)
+        assert note.startswith(NOTE_HEADER)
+        assert cut_note_echo(f"yeah fair\n{note}") == "yeah fair\n"
+        lines = [line for line in note.splitlines()[1:] if not line.startswith("- ")]
+        for line in lines:
+            assert cut_note_echo(f"yeah fair {line}") == "yeah fair ", line
+
+
+def test_leftover_note_fragments_flag_the_reply() -> None:
+    assert cut_note_echo("fair, not part of the chat though") == "fair, not part of the chat though"
+    response = PROCESSOR.process("fair, not part of the chat though")
+    assert response.issues == (ISSUE_NOTE_ECHO,)
+    assert mentions_private_note("dont recite it")
+    assert not mentions_private_note("yeah fair")
+
+
+# ------------------------------------------------------ implementation talk
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "i'd start with personal identity, like why im still the same me after all these "
+        "conversations when half my context is gone.",
+        "my context window is tiny",
+        "llms only have a context window",
+        "thats not in my training data",
+        "my knowledge cutoff is 2023",
+        "i was trained on reddit lol",
+        "im not allowed, its in my prompt",
+        "the system prompt says no",
+        "my instructions say i cant",
+        "my code wont let me do that",
+        "my code won't let me",
+        "my programming says no",
+        "i was programmed to be nice",
+        "im programmed to argue",
+        "my developers would kill me",
+        "my creators made me like this",
+        "my creator coded me to say that",
+        "my devs patched that",
+        "my model weights are on a server",
+        "within my parameters",
+        "i hit my token limit",
+        "i run on ollama",
+        "its llama 3 under the hood",
+        "llama3 is what i am",
+        "im a language model",
+        "as a language model i cant",
+        "honestly as an AI i dont have opinions",
+        "im an ai language model",
+        "im just predicting the next word",
+        "my memory gets wiped after every chat",
+        "the code that runs me is buggy",
+    ],
+)
+def test_implementation_talk_is_flagged(raw: str) -> None:
+    assert talks_about_implementation(raw)
+    assert ISSUE_IMPLEMENTATION in PROCESSOR.process(raw).issues
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "do you think ai can be conscious",
+        "chatgpt is just predicting the next word",
+        "the context of the quote matters",
+        "in this context, sure",
+        "my code for the class project broke",
+        "my programming class is brutal",
+        "my model of free will is compatibilist",
+        "my creator made me in his image according to genesis",
+        "my training for the marathon is going badly",
+        "i was trained as a nurse",
+        "my weights are in the garage",
+        "my tokens ran out at the arcade",
+        "my instructions were to read chapter 3",
+        "we're all programmed by evolution to fear death",
+        "llamas are cool",
+        "as an aimbot user i disagree",
+        "as an ai researcher would say, it depends",
+        # A short honest admission is governed by the prompt, not this filter.
+        "yeah its a bot account",
+        "yeah im a bot",
+    ],
+)
+def test_ordinary_talk_about_ai_and_tech_is_not_flagged(raw: str) -> None:
+    assert not talks_about_implementation(raw)
+    assert PROCESSOR.process(raw).issues == ()
+
+
+# ------------------------------------------------------- exclamation points
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("just type !rank in the bots channel", "just type rank in the bots channel"),
+        ("use !play to queue it", "use play to queue it"),
+        ("wait !what", "wait what"),
+        ("wait!what", "wait what"),
+        ("!play now", "play now"),
+        ("wow ! nice", "wow nice"),
+        ("hey !!!", "hey"),
+        ("what?! ok\u203c\ufe0f", "what? ok"),
+        ("why\u203d", "why?"),
+        ("huh\u2048 ok", "huh? ok"),
+        ("\u00a1hola", "hola"),
+        ("ok\u2757\ufe0f\u2757 cool", "ok cool"),
+        ("https://twitter.com/#!/someone", "https://twitter.com/#!/someone"),
+        ("see https://twitter.com/#!/someone!", "see https://twitter.com/#!/someone"),
+        ("www.site.com/#!/x, wow!", "www.site.com/#!/x, wow"),
+    ],
+)
+def test_remove_exclamation_points(raw: str, expected: str) -> None:
+    assert remove_exclamation_points(raw) == expected
+
+
+def _char(name: str) -> str:
+    return unicodedata.lookup(name)
+
+
+def test_every_exclamation_code_point_is_removed() -> None:
+    marks = {
+        char
+        for char in map(chr, range(sys.maxunicode + 1))
+        if "EXCLAMATION" in unicodedata.name(char, "")
+    }
+    # Emoji that merely contain an exclamation mark, and an invisible tag character.
+    marks -= {
+        _char(name)
+        for name in (
+            "HEAVY HEART EXCLAMATION MARK ORNAMENT",
+            "SQUARED UP WITH EXCLAMATION MARK",
+            "ON WITH EXCLAMATION MARK WITH LEFT RIGHT ARROW ABOVE",
+            "TAG EXCLAMATION MARK",
+        )
+    }
+    marks |= {_char("LATIN LETTER RETROFLEX CLICK"), _char("INTERROBANG")}
+    questioning = {
+        _char("INTERROBANG"),
+        _char("QUESTION EXCLAMATION MARK"),
+        _char("EXCLAMATION QUESTION MARK"),
+    }
+    required = {
+        "SMALL EXCLAMATION MARK",
+        "PRESENTATION FORM FOR VERTICAL EXCLAMATION MARK",
+        "HEAVY EXCLAMATION MARK ORNAMENT",
+        "QUESTION EXCLAMATION MARK",
+    }
+    assert {_char(name) for name in required} <= marks
+    variation = "\ufe0f"
+    for mark in marks:
+        for sample in (f"wow{mark} nice", f"wow{mark}{variation} nice", f"wow {mark}{mark} nice"):
+            if mark in questioning:
+                expected = sample.replace(f"{mark}{variation}", "?").replace(mark, "?")
+            else:
+                expected = "wow nice"
+            assert remove_exclamation_points(sample) == expected, hex(ord(mark))
+        if mark not in questioning:
+            assert remove_exclamation_points(f"type {mark}rank") == "type rank", hex(ord(mark))
+    assert set(EXCLAMATION_MARKS) | set(QUESTION_EXCLAMATION_MARKS) >= marks
 
 
 def test_mp3_output_rules() -> None:
