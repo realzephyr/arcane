@@ -96,3 +96,15 @@ async def test_provider_errors_propagate() -> None:
     manager = ResponseManager(MP3, ScriptedProvider(ProviderUnavailableError("down")))
     with pytest.raises(ProviderUnavailableError):
         await manager.generate(_context())
+
+
+async def test_blocked_replies_are_regenerated_or_dropped() -> None:
+    strict = MP3.model_copy(
+        update={"style": MP3.style.model_copy(update={"blocked_patterns": (r"\bbadword\b",)})}
+    )
+    provider = ScriptedProvider("that is a badword", "clean reply")
+    reply = await ResponseManager(strict, provider).generate(_context())
+    assert reply is not None and reply.parts == ("clean reply",)
+
+    always_bad = ScriptedProvider("badword again")
+    assert await ResponseManager(strict, always_bad).generate(_context()) is None

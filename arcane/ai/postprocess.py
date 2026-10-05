@@ -4,8 +4,10 @@ Models drift from instructions in predictable ways: they think out loud in
 ``<think>`` tags, prefix their name, wrap replies in quotes, reach for
 markdown, open with assistant clichés, or keep going and write the other
 people's lines too. :class:`ResponsePostProcessor` corrects all of that, makes
-mass mentions harmless, enforces length limits, and splits the reply into the
-separate messages the model indicated with blank lines.
+mass mentions harmless, applies the personality's style switches (no
+exclamation points, lowercase message starts), enforces length limits, splits
+the reply into the separate messages the model indicated with blank lines, and
+flags replies that contain blocked patterns.
 """
 
 from __future__ import annotations
@@ -50,6 +52,12 @@ _MANY_NEWLINES_RE = re.compile(r"\n{3,}")
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|\n")
 _MASS_MENTION_RE = re.compile(r"@(everyone|here)\b", re.IGNORECASE)
+# "!", inverted "¡", fullwidth, and the emoji forms (heavy, white, double, and "!?").
+_EXCLAMATION_CHARS = "!\u00a1\uff01\u2757\u2755\u203c\u2049"
+_EXCLAMATION_BETWEEN_WORDS_RE = re.compile(rf"(?<=\w)[{_EXCLAMATION_CHARS}]+\ufe0f?(?=\w)")
+_EXCLAMATION_RE = re.compile(rf"[ \t]*[{_EXCLAMATION_CHARS}]+\ufe0f?")
+_MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
+_TITLE_WORD_START_RE = re.compile(r"^([A-Z])(?=[a-z'\u2019]*\b)(?![A-Z])")
 _QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("'", "'"))
 
 
@@ -58,6 +66,8 @@ class ProcessedResponse:
     """Cleaned output, already split into Discord messages."""
 
     parts: tuple[str, ...]
+    blocked: bool = False
+    """True when the reply matches one of the personality's blocked patterns."""
 
     @property
     def text(self) -> str:
@@ -83,6 +93,10 @@ class ResponsePostProcessor:
         )
         self._opener_re = re.compile(rf"^\s*(?:{alternatives})\s*[,.!:;—-]*\s*", re.IGNORECASE)
         self._own_names = (*personality.names, *_GENERIC_SPEAKERS)
+        style = personality.style
+        self._allow_exclamations = style.allow_exclamation_points
+        self._lowercase_starts = style.lowercase_starts
+        self._blocked = tuple(re.compile(p, re.IGNORECASE) for p in style.blocked_patterns)
 
     def process(self, raw: str, *, other_speakers: Iterable[str] = ()) -> ProcessedResponse:
         """Clean ``raw`` model output.
@@ -99,11 +113,17 @@ class ResponsePostProcessor:
         text = _GAP_MARKER_RE.sub("", text)
         text = _strip_markdown(text)
         text = self._strip_openers(text)
+        if not self._allow_exclamations:
+            text = remove_exclamation_points(text)
         text = _MASS_MENTION_RE.sub(lambda m: f"@{_ZERO_WIDTH_SPACE}{m.group(1)}", text)
         text = _TRAILING_SPACE_RE.sub("", text)
         text = _MANY_NEWLINES_RE.sub("\n\n", text).strip()
         text = truncate_text(text, self._max_chars)
-        return ProcessedResponse(tuple(split_messages(text, self._max_parts)))
+        parts = split_messages(text, self._max_parts)
+        if self._lowercase_starts:
+            parts = [lowercase_start(part) for part in parts]
+        blocked = any(pattern.search(text) for pattern in self._blocked)
+        return ProcessedResponse(tuple(parts), blocked=blocked)
 
     # ---------------------------------------------------------------- internals
 
@@ -136,6 +156,21 @@ class ResponsePostProcessor:
                 break
             text = stripped
         return text
+
+
+def remove_exclamation_points(text: str) -> str:
+    """Remove every exclamation point ("wow!" -> "wow", "what?!" -> "what?")."""
+    text = _EXCLAMATION_BETWEEN_WORDS_RE.sub(" ", text)
+    text = _EXCLAMATION_RE.sub("", text)
+    return _MULTI_SPACE_RE.sub(" ", text)
+
+
+def lowercase_start(text: str) -> str:
+    """Lowercase a capitalised first word ("Yeah" -> "yeah", "I'm" -> "i'm").
+
+    All-caps words ("LMAO", "NASA") are left alone.
+    """
+    return _TITLE_WORD_START_RE.sub(lambda m: m.group(1).lower(), text, count=1)
 
 
 def _strip_wrapping_quotes(text: str) -> str:

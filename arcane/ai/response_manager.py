@@ -126,6 +126,8 @@ class ResponseManager:
     def _problem_with(processed: ProcessedResponse, recent_self: list[str]) -> str | None:
         if processed.is_empty:
             return "empty after post-processing"
+        if processed.blocked:
+            return "contains a blocked pattern"
         candidate = _normalize(processed.text)
         if len(candidate) < REPETITION_MIN_CHARS:
             return None

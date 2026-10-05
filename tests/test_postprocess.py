@@ -84,3 +84,30 @@ def test_truncate_and_split_helpers() -> None:
 def test_strip_reasoning_variants() -> None:
     assert strip_reasoning("<thinking>x</thinking>  y") == "y"
     assert strip_reasoning("plain") == "plain"
+
+
+def _styled(**style: object) -> ResponsePostProcessor:
+    personality = load_personality("mp3")
+    return ResponsePostProcessor(
+        personality.model_copy(update={"style": personality.style.model_copy(update=style)})
+    )
+
+
+def test_exclamation_points_can_be_banned() -> None:
+    processor = _styled(allow_exclamation_points=False)
+    raw = "no way!! thats sick\n\nwait what?! ok‼️"
+    assert processor.process(raw).parts == ("no way thats sick", "wait what? ok")
+    assert all("!" not in part for part in processor.process("Wow! Nice!!!").parts)
+    assert _styled(allow_exclamation_points=True).process("nice!").parts == ("nice!",)
+
+
+def test_lowercase_starts() -> None:
+    processor = _styled(lowercase_starts=True)
+    assert processor.process("Yeah fair\n\nI think so").parts == ("yeah fair", "i think so")
+    assert processor.process("LMAO no").parts == ("LMAO no",)
+
+
+def test_blocked_patterns_flag_the_reply() -> None:
+    processor = _styled(blocked_patterns=(r"\bforbidden\w*",))
+    assert processor.process("that word is FORBIDDEN here").blocked
+    assert not processor.process("all good").blocked
