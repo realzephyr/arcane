@@ -34,8 +34,30 @@ def test_every_category_has_cases_and_a_usable_label() -> None:
         assert category.patterns
 
 
-def test_names_are_stripped_for_any_personality() -> None:
-    assert detect_impossible_request("vex hop in vc", names=("vex",)) is not None
+@pytest.mark.parametrize(
+    "text",
+    [
+        "yo mp3 wanna hop in vc",
+        "mp3 hop in vc",
+        "ok mp3, send a pic",
+        "bro mp3 whats your snap",
+        "mp 3 wanna play val",
+        "@mp3 join vc",
+    ],
+)
+def test_requests_addressing_the_bot_by_name(text: str) -> None:
+    assert detect_impossible_request(text, names=NAMES) is not None
+
+
+@pytest.mark.parametrize(
+    "text", ["mp3 was in vc earlier", "send me the mp3 file", "i like mp3 more than wav"]
+)
+def test_name_mentions_that_are_not_requests(text: str) -> None:
+    assert detect_impossible_request(text, names=NAMES) is None
+
+
+def test_names_work_for_any_personality() -> None:
+    assert detect_impossible_request("yo vex hop in vc", names=("vex",)) is not None
     assert detect_impossible_request("vex, wanna vc?", names=("vex",)) is not None
     assert detect_impossible_request("vex was in vc yesterday", names=("vex",)) is None
 

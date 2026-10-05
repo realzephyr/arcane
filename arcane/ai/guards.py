@@ -398,20 +398,23 @@ def detect_impossible_request(text: str, *, names: Iterable[str] = ()) -> Imposs
 
     Args:
         text: The message (or several messages joined with newlines).
-        names: Names the bot answers to; a leading "mp3," is stripped so
-            "mp3 hop in vc" reads like "hop in vc".
+        names: Names the bot answers to. They are rewritten to the "@name" form
+            Discord uses for a real mention, which the patterns already treat as
+            a lead-in, so "yo mp3 hop in vc" reads like "yo @mp3 hop in vc".
     """
     text = text.replace("\u2019", "'")[:MAX_SCAN_CHARS]
-    text = _strip_leading_names(text, names)
+    text = _normalize_names(text, names)
     for category in CATEGORIES:
         if any(pattern.search(text) for pattern in category.patterns):
             return ImpossibleRequest(category.key, category.label)
     return None
 
 
-def _strip_leading_names(text: str, names: Iterable[str]) -> str:
-    alternatives = "|".join(re.escape(name) for name in names if name.strip())
+def _normalize_names(text: str, names: Iterable[str]) -> str:
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(names, key=len, reverse=True) if name.strip()
+    )
     if not alternatives:
         return text
-    pattern = re.compile(rf"^\W*(?:{alternatives})\b[\s,.:!-]*", re.IGNORECASE | re.MULTILINE)
-    return pattern.sub("", text)
+    pattern = re.compile(rf"(?<![\w@])(?:{alternatives})(?!\w)", re.IGNORECASE)
+    return pattern.sub("@bot", text)

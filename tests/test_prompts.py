@@ -121,6 +121,9 @@ def test_capability_guard_adds_instruction() -> None:
     assert "Don't agree" in note
     plain = _note(_context(target_message="vc was so laggy yesterday"))
     assert "They're asking you to" not in plain
+    # Addressing the bot by name in the middle of the lead-in still counts.
+    named = _note(_context(target_message="yo mp3 wanna hop in vc"))
+    assert "They're asking you to hop on a voice call" in named
 
 
 def test_consecutive_messages_are_merged_and_replies_annotated() -> None:

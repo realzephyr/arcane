@@ -184,7 +184,7 @@ def test_opener_reply() -> None:
 
 
 def test_spontaneous_interest() -> None:
-    message = incoming("honestly i think the bronze age collapse is the most interesting era")
+    message = incoming("honestly i think the fermi paradox is the scariest thing out there")
     assert engine(roll=0.0).decide(message, None, now=NOW).reason is Reason.INTEREST
     assert engine(roll=0.5).decide(message, None, now=NOW).reason is Reason.NOT_ADDRESSED
     recently_spoke = NOW - timedelta(seconds=30)

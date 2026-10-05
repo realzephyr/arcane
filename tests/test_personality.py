@@ -85,7 +85,7 @@ def test_name_detection(text: str, expected: bool) -> None:
 
 def test_interest_hits_handle_words_and_phrases() -> None:
     mp3 = load_personality("mp3")
-    assert mp3.interest_hits("is free will compatible with physics?") == 2
+    assert mp3.interest_hits("is free will even real or is it just simulation theory") == 2
     assert mp3.interest_hits("anyone up for some games tonight") == 0
     assert _minimal(interest_keywords=["Kant"]).interest_keywords == frozenset({"kant"})
 
@@ -95,3 +95,20 @@ def test_invalid_blocked_pattern_is_rejected() -> None:
 
     with pytest.raises(ValidationError, match="invalid blocked pattern"):
         StyleProfile(blocked_patterns=("(unclosed",))
+
+
+def test_mp3_persona_rules() -> None:
+    """The owner's requirements for mp3, pinned so a persona edit can't drop them."""
+    import json
+
+    mp3 = load_personality("mp3")
+    assert "!" not in json.dumps(mp3.model_dump(mode="json"))
+    assert mp3.style.allow_exclamation_points is False
+    assert mp3.style.lowercase_starts is True
+    assert "18 year old" in mp3.identity
+    assert "sincerely asks whether you're a bot or an ai you say yes" in mp3.identity
+    guidelines = " ".join(mp3.style.guidelines).lower()
+    assert "never type an exclamation point" in guidelines
+    assert "join vc" in guidelines and "never say yes" in guidelines
+    assert "no slurs" in guidelines and "no flirting" in guidelines
+    assert mp3.timing.typing_speed_wpm == 60
