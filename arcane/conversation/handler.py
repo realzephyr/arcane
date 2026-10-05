@@ -4,8 +4,9 @@
 
 1. **Observe** every message in channels the bot may use: store it in
    short-term memory and keep track of channel activity.
-2. **Decide** with the :class:`DecisionEngine` whether to respond, update
-   conversational focus, and reserve a rate-limit slot.
+2. **Decide** with the :class:`DecisionEngine` whether to respond and update
+   conversational focus. Rate limits count replies actually sent and are
+   re-checked just before generating, so queued triggers can't exceed them.
 3. **Queue** the message on its channel's session. Each channel has at most
    one worker task, so the bot never talks over itself, and bursts of messages
    are debounced into a single reply.
@@ -225,7 +226,6 @@ class ConversationHandler:
             decision.reason,
         )
         self._tracker.note_engagement(message, now)
-        self._rate_limiter.record(message.channel_id, message.author_id, now)
         await self._persist_conversation(message.channel_id)
         await self._touch_user(message)
         self._enqueue(message, decision)
@@ -336,6 +336,17 @@ class ConversationHandler:
         target = batch[-1].message
         incoming_text = "\n".join(t.message.text_for_prompt() for t in batch)
 
+        # Limits count replies, not triggers. Re-check now: other replies may have
+        # gone out since this message was accepted.
+        if not self._rate_limiter.allows(target.channel_id, target.author_id, self._clock()):
+            logger.info(
+                "[%s] %s: skipping reply to %s (rate limited)",
+                self.bot_id,
+                target.channel.display_name,
+                target.author_name,
+            )
+            return
+
         lead = self._timing.response_lead_time(incoming_text) - already_waited
         if lead > 0:
             await self._sleep(lead)
@@ -345,9 +356,9 @@ class ConversationHandler:
         if reply is None:
             return
 
-        self._tracker.note_bot_message(
-            target.channel_id, self._clock(), guild_id=target.channel.guild_id
-        )
+        now = self._clock()
+        self._rate_limiter.record(target.channel_id, target.author_id, now)
+        self._tracker.note_bot_message(target.channel_id, now, guild_id=target.channel.guild_id)
         await self._persist_conversation(target.channel_id)
         logger.info(
             "[%s] %s: replied to %s with %d message(s) (model %s, %.1fs, attempt %d)",
@@ -536,6 +547,7 @@ class ConversationHandler:
             if reply is None:
                 return False
             now = self._clock()
+            self._rate_limiter.record(channel_id, None, now)
             await self._initiatives.record(channel_id, topic, now)
             self._tracker.note_bot_message(
                 channel_id, now, guild_id=channel.guild_id, initiated=True

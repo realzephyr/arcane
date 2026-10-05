@@ -237,17 +237,46 @@ async def test_transport_failure_is_handled(db: Database) -> None:
     assert transport.events == ["typing_on", "typing_off"]
 
 
-async def test_rate_limit_stops_mention_spam(db: Database) -> None:
+async def test_rate_limit_counts_replies_not_triggers(db: Database) -> None:
     h = await make_harness(db)
-    reasons = []
-    for i in range(6):
-        decision = await h.say(f"mp3 spam {i}", mentions_bot=True)
-        assert decision is not None
-        reasons.append(decision.reason)
-    await h.settle()
     limit = MP3.behavior.max_replies_per_user_per_minute
-    assert reasons[:limit] == [Reason.MENTION] * limit
-    assert set(reasons[limit:]) == {Reason.RATE_LIMITED}
+    for i in range(limit):
+        decision = await h.say(f"mp3 question {i}", mentions_bot=True)
+        assert decision is not None and decision.reason is Reason.MENTION
+        await h.settle()
+    assert len(h.transport.sent) == limit
+
+    blocked = await h.say("mp3 one more?", mentions_bot=True)
+    assert blocked is not None and blocked.reason is Reason.RATE_LIMITED
+
+    h.clock.advance(seconds=61)
+    allowed = await h.say("mp3 ok now?", mentions_bot=True)
+    assert allowed is not None and allowed.reason is Reason.MENTION
+    await h.settle()
+
+
+async def test_queued_spam_cannot_exceed_the_limit(db: Database) -> None:
+    provider = GatedProvider("ok")
+    h = await make_harness(db, provider)
+    for i in range(10):
+        await h.say(f"mp3 spam {i}", mentions_bot=True, author_id=100 + i, author_name=f"u{i}")
+    provider.gate.set()
+    await h.settle()
+    assert len(h.transport.sent) <= MP3.behavior.max_replies_per_channel_per_minute
+
+
+async def test_burst_uses_one_rate_limit_slot(db: Database) -> None:
+    provider = GatedProvider("ok")
+    h = await make_harness(db, provider)
+    await h.say("mp3 first", mentions_bot=True)
+    await provider.started.wait()
+    for i in range(3):
+        await h.say(f"follow-up {i}")
+    provider.gate.set()
+    await h.settle()
+    # One reply for the first message, one batched reply for the follow-ups.
+    assert len(h.transport.sent) == 2
+    assert h.handler._rate_limiter._users.count(ALICE, h.clock.now) == 2
 
 
 async def test_stale_triggers_are_dropped(db: Database) -> None:
