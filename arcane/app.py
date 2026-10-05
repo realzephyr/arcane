@@ -123,6 +123,14 @@ class Application:
             if handler.initiative_active
             else "off",
         )
+        if handler.initiative_active and not config.initiative_channel_ids:
+            logger.info(
+                "[%s] may chime into any channel it can talk in when idle; set "
+                "%sINITIATIVE_CHANNEL_IDS (or ARCANE_INITIATIVE_CHANNEL_IDS) to limit where, "
+                "or ARCANE_INITIATIVE_ENABLED=false to turn it off",
+                personality.id,
+                BotConfig.env_prefix(personality.id),
+            )
         return BotRuntime(config, personality, client, handler, tasks)
 
     async def _preflight(self) -> None:

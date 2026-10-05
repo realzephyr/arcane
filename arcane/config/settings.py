@@ -106,8 +106,12 @@ class Settings(BaseSettings):
     long_term_memory_enabled: bool = True
 
     allowed_channel_ids: ChannelIdList = ()
+    """Channels the bots may read and talk in; empty means every channel they can see."""
     initiative_channel_ids: ChannelIdList = ()
+    """Channels the bots may chime into on their own; empty means any allowed channel
+    (except ones whose names suggest unprompted chatter is unwelcome, like #vent)."""
     initiative_enabled: bool = True
+    """Whether bots chime into active chats on their own when they aren't talking."""
     respond_in_dms: bool = True
     humanize: bool = True
     conversation_timeout_seconds: int | None = Field(default=None, ge=30)
