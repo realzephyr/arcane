@@ -173,7 +173,7 @@ def test_openers_only_match_whole_words_and_keep_negations(raw: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("ah, fair", "fair"),
+        ("ah yes, fair", "fair"),
         ("Ah yes the trolley problem", "the trolley problem"),
         ("Absolutely, kant is right", "kant is right"),
         ("Of course. thats the point", "thats the point"),

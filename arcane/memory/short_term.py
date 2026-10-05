@@ -174,6 +174,23 @@ class ShortTermMemory:
             last_self_message_at=_optional_dt(row["last_self_at"]),
         )
 
+    async def active_channels(self, since: datetime) -> list[tuple[int, datetime]]:
+        """Server channels where a person (not a bot) posted since ``since``.
+
+        Returns ``(channel_id, last_human_message_at)``, most recent first.
+        """
+        rows = await self._db.fetch_all(
+            """
+            SELECT channel_id, MAX(created_at) AS last_human_at FROM messages
+            WHERE bot_id = ? AND author_is_bot = 0 AND is_self = 0
+              AND guild_id IS NOT NULL AND created_at >= ?
+            GROUP BY channel_id
+            ORDER BY last_human_at DESC
+            """,
+            (self.bot_id, to_timestamp(since)),
+        )
+        return [(row["channel_id"], from_timestamp(row["last_human_at"])) for row in rows]
+
     # ------------------------------------------------------------- conversations
 
     async def save_conversation(self, record: ConversationRecord) -> None:
@@ -181,8 +198,9 @@ class ShortTermMemory:
             """
             INSERT INTO conversations (
                 bot_id, channel_id, guild_id, partner_id, partner_name, participants,
-                started_at, last_activity_at, bot_turns, user_turns, awaiting_reply_since
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                started_at, last_activity_at, bot_turns, user_turns, awaiting_reply_since,
+                awaiting_reply_from
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (bot_id, channel_id) DO UPDATE SET
                 guild_id = excluded.guild_id,
                 partner_id = excluded.partner_id,
@@ -192,7 +210,8 @@ class ShortTermMemory:
                 last_activity_at = excluded.last_activity_at,
                 bot_turns = excluded.bot_turns,
                 user_turns = excluded.user_turns,
-                awaiting_reply_since = excluded.awaiting_reply_since
+                awaiting_reply_since = excluded.awaiting_reply_since,
+                awaiting_reply_from = excluded.awaiting_reply_from
             """,
             (
                 self.bot_id,
@@ -206,6 +225,7 @@ class ShortTermMemory:
                 record.bot_turns,
                 record.user_turns,
                 _optional_ts(record.awaiting_reply_since),
+                record.awaiting_reply_from,
             ),
         )
 
@@ -289,6 +309,7 @@ def _conversation_from_row(row: aiosqlite.Row) -> ConversationRecord:
         bot_turns=row["bot_turns"],
         user_turns=row["user_turns"],
         awaiting_reply_since=_optional_dt(row["awaiting_reply_since"]),
+        awaiting_reply_from=row["awaiting_reply_from"],
     )
 
 

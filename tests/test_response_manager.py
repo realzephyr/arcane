@@ -8,6 +8,7 @@ from arcane.ai.postprocess import ProcessedResponse
 from arcane.ai.prompts import PromptContext
 from arcane.ai.providers.base import ProviderUnavailableError
 from arcane.ai.response_manager import ResponseManager
+from arcane.core.clock import utcnow
 from arcane.personalities.registry import load_personality
 from tests.factories import GENERAL, history
 from tests.fakes import ScriptedProvider
@@ -142,3 +143,31 @@ def test_problem_is_the_first_issue() -> None:
     assert ResponseManager._problem_with(processed, []) == "contains a blocked pattern"
     assert ResponseManager._problem_with(ProcessedResponse(("fine",)), []) is None
     assert not ProcessedResponse(("x",), issues=("talks about how it works",)).blocked
+
+
+async def test_agreeing_to_an_impossible_request_is_regenerated() -> None:
+    provider = ScriptedProvider("omw", "nah i dont do vc lol")
+    manager = ResponseManager(MP3, provider)
+    reply = await manager.generate(_vc_context("yo mp3 hop in vc"))
+    assert reply is not None and reply.text == "nah i dont do vc lol"
+    assert reply.attempts == 2
+    retry_prompt = provider.calls[1][0][-1].content
+    assert "turn it down casually" in retry_prompt
+
+
+async def test_agreement_check_only_applies_to_impossible_requests() -> None:
+    manager = ResponseManager(MP3, ScriptedProvider("bet"))
+    reply = await manager.generate(_vc_context("mp3 debate me on free will"))
+    assert reply is not None and reply.text == "bet"
+
+
+def _vc_context(text: str) -> PromptContext:
+    return PromptContext(
+        personality=MP3,
+        channel=GENERAL,
+        history=[history(text, author_name="alice")],
+        now=utcnow(),
+        target_user_id=1,
+        target_user_name="alice",
+        target_message=text,
+    )

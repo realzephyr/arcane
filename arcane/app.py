@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import signal
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from typing import Any
 
 import aiohttp
 import discord
@@ -60,6 +63,7 @@ class Application:
         self._providers = ProviderRegistry(settings)
         self._runtimes: list[BotRuntime] = []
         self._stop = asyncio.Event()
+        self._warm_ups: list[Callable[[], Coroutine[Any, Any, bool]]] = []
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -69,8 +73,8 @@ class Application:
         try:
             await self._database.connect()
             self._runtimes = [self._build_runtime(config) for config in self._bot_configs]
-            await self._preflight()
             self._install_signal_handlers()
+            await self._preflight()
             return await self._run_bots()
         finally:
             await self._shutdown()
@@ -105,7 +109,7 @@ class Application:
                 PeriodicTask(
                     f"{personality.id}-initiative",
                     handler.maybe_initiate,
-                    interval=personality.behavior.initiative.check_interval_minutes * 60,
+                    interval=personality.behavior.initiative.check_interval_seconds,
                     jitter=0.25,
                 )
             )
@@ -115,7 +119,7 @@ class Application:
             personality.id,
             config.model or personality.model.model or provider.default_model,
             ", ".join(map(str, config.allowed_channel_ids)) or "all",
-            ", ".join(map(str, config.initiative_channel_ids))
+            (", ".join(map(str, config.initiative_channel_ids)) or "any")
             if handler.initiative_active
             else "off",
         )
@@ -144,10 +148,16 @@ class Application:
                 logger.warning("%s: %s", provider.name, health.detail)
             else:
                 logger.info("%s: %s", provider.name, health.detail)
-                # Load the model now, with the same num_ctx replies will use, so the
-                # first message isn't slowed down by a model load.
-                responses = runtime.handler.response_manager
-                await provider.warm_up(model=model, options=responses.base_options())
+                # Load the model with the same num_ctx replies will use, so the first
+                # message isn't slowed down by a model load. It runs in the background
+                # while the bots log in: a slow load must not keep them offline.
+                self._warm_ups.append(
+                    functools.partial(
+                        provider.warm_up,
+                        model=model,
+                        options=runtime.handler.response_manager.base_options(),
+                    )
+                )
 
     # ----------------------------------------------------------------- running
 
@@ -157,6 +167,9 @@ class Application:
             for runtime in self._runtimes
         }
         stop_task = asyncio.create_task(self._stop.wait(), name="stop-signal")
+        warm_ups = [
+            asyncio.create_task(warm_up(), name="model-warm-up") for warm_up in self._warm_ups
+        ]
         failures = 0
         try:
             pending = set(bot_tasks)
@@ -176,9 +189,9 @@ class Application:
             return EXIT_FAILURE if failures else EXIT_OK
         finally:
             stop_task.cancel()
-            for task in bot_tasks:
-                task.cancel()
-            await asyncio.gather(stop_task, *bot_tasks, return_exceptions=True)
+            for running in (*bot_tasks, *warm_ups):
+                running.cancel()
+            await asyncio.gather(stop_task, *bot_tasks, *warm_ups, return_exceptions=True)
 
     async def _run_bot(self, runtime: BotRuntime) -> None:
         bot_id = runtime.personality.id

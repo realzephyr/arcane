@@ -60,25 +60,43 @@ class StyleProfile(_Profile):
 class TimingProfile(_Profile):
     """Human-like pacing. Ranges are ``(min, max)`` seconds.
 
-    The bot reads first (no typing indicator), then shows the typing indicator
-    while the model generates, and sends once a human typing at
-    ``typing_speed_wpm`` would have finished. Generation time counts towards the
-    typing time, so a slow model never adds delay on top of the typing time.
+    A reply happens in three steps, like a person in a chat:
+
+    1. **read**: notice the message, then read it (no typing indicator). The
+       model writes the reply at the same time, silently, the way a person
+       thinks while reading;
+    2. **type**: once the reply is ready, the typing indicator shows for as
+       long as typing that reply takes: ``typing_start_seconds`` plus its
+       length at ``typing_speed_wpm``. Short replies are quick, long ones take
+       longer;
+    3. **send**.
+
+    The defaults reproduce what feels natural in chat: "nothing much" shows
+    about 2 seconds of typing, a 107-character sentence about 7 seconds.
     """
 
-    typing_speed_wpm: float = Field(default=60.0, gt=0, le=250)
-    """Typing speed in words per minute (one word = five characters)."""
-    reading_speed_wpm: float = Field(default=300.0, gt=0)
-    """Reading speed in words per minute for incoming messages."""
-    reaction_seconds: tuple[float, float] = (0.3, 1.2)
+    typing_speed_wpm: float = Field(default=210.0, gt=0, le=600)
+    """How fast replies appear to be typed, in words per minute (one word = five
+    characters). This is the speed people perceive in a chat window, not a
+    keyboard test: with ``typing_start_seconds`` it puts short replies at about
+    2 seconds and a full sentence at about 7."""
+    typing_start_seconds: float = Field(default=1.2, ge=0, le=10)
+    """The moment before the first keystroke, added to every message."""
+    reading_speed_wpm: float = Field(default=500.0, gt=0)
+    """Reading speed in words per minute for incoming messages (people skim chat)."""
+    reaction_seconds: tuple[float, float] = (0.3, 1.0)
     """Time to notice new messages before reading them."""
+    follow_up_wait_seconds: float = Field(default=2.0, ge=0, le=10)
+    """Extra time to wait when a message is only a short attention-getter ("yo",
+    "mp3"), because the real question usually follows a moment later."""
     pause_between_messages_seconds: tuple[float, float] = (0.4, 1.2)
     """Pause after sending one message of a split reply before typing the next."""
     min_typing_seconds: float = Field(default=0.8, ge=0)
-    max_typing_seconds: float = Field(default=45.0, gt=0)
-    """Upper bound for typing a single message (225 characters at 60 wpm)."""
-    max_reading_seconds: float = Field(default=8.0, gt=0)
-    """Upper bound for the whole reading phase, including follow-up messages."""
+    max_typing_seconds: float = Field(default=15.0, gt=0)
+    """Upper bound for typing a single message, so long replies never drag."""
+    max_reading_seconds: float = Field(default=6.0, gt=0)
+    """Upper bound for the reading phase. Follow-up messages from the same person
+    that arrive within it are read too and answered together."""
     variation: float = Field(default=0.15, ge=0, le=1)
     """Spread of the log-normal noise applied to reading and typing times."""
 
@@ -100,19 +118,34 @@ class TimingProfile(_Profile):
 
 
 class InitiativeProfile(_Profile):
-    """When the personality may start a conversation on its own."""
+    """When the personality chimes into chat on its own.
+
+    Whenever it isn't talking with anyone, it looks for the channel where people
+    talked most recently. There it either replies to one of their recent
+    messages that's worth discussing, or drops a message of its own about one
+    of its conversation topics. Cooldowns and a daily cap keep it from
+    dominating a channel.
+    """
 
     enabled: bool = True
-    check_interval_minutes: float = Field(default=15.0, gt=0)
-    min_quiet_minutes: float = Field(default=90.0, ge=1)
-    """The channel must have been silent at least this long."""
-    recent_activity_hours: float = Field(default=24.0, gt=0)
-    """Someone (human) must have spoken within this window; no talking to empty rooms."""
-    min_interval_minutes: float = Field(default=240.0, ge=1)
-    """Minimum time between two openers in the same channel."""
-    max_per_channel_per_day: int = Field(default=2, ge=0)
-    chance: float = Field(default=0.3, ge=0, le=1)
-    """Probability of acting when every other condition is met."""
+    check_interval_seconds: float = Field(default=45.0, ge=5)
+    """How often it looks for a chance to chime in."""
+    idle_seconds: float = Field(default=180.0, ge=0)
+    """Only chime in after not having talked with anyone for this long."""
+    active_window_seconds: float = Field(default=600.0, gt=0)
+    """A channel counts as active when someone posted within this window."""
+    reply_max_age_seconds: float = Field(default=300.0, gt=0)
+    """Only messages younger than this are replied to."""
+    channel_cooldown_minutes: float = Field(default=15.0, ge=0)
+    """Minimum time between two chime-ins in the same channel."""
+    min_interval_minutes: float = Field(default=8.0, ge=0)
+    """Minimum time between two chime-ins anywhere."""
+    max_per_channel_per_day: int = Field(default=20, ge=0)
+    chance: float = Field(default=0.5, ge=0, le=1)
+    """Probability of acting on a check when every other condition is met."""
+    reply_chance: float = Field(default=0.65, ge=0, le=1)
+    """When a recent message is worth answering, the chance of replying to it
+    rather than posting a message of its own."""
     active_hours_utc: tuple[int, int] | None = None
     """Optional ``(start_hour, end_hour)`` window in UTC; may wrap past midnight."""
 
@@ -139,8 +172,9 @@ class BehaviorProfile(_Profile):
     spontaneous_min_words: int = Field(default=6, ge=1)
     spontaneous_cooldown_seconds: int = Field(default=900, ge=0)
     """Minimum time since its last message in the channel before joining uninvited."""
-    opener_reply_window_seconds: int = Field(default=600, ge=0)
-    """After posting an opener, treat the next message within this window as a reply."""
+    opener_reply_window_seconds: int = Field(default=180, ge=0)
+    """After chiming in, treat the next message within this window as an answer
+    (only from the person it replied to, when it replied to someone)."""
     respond_to_bots: bool = False
     max_replies_per_channel_per_minute: int = Field(default=15, ge=1)
     max_replies_per_user_per_minute: int = Field(default=12, ge=1)

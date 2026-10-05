@@ -109,4 +109,9 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX idx_initiatives_channel ON initiatives (bot_id, channel_id, created_at)",
         ),
     ),
+    Migration(
+        version=2,
+        description="conversations.awaiting_reply_from: answers to a chime-in reply",
+        statements=("ALTER TABLE conversations ADD COLUMN awaiting_reply_from INTEGER",),
+    ),
 )

@@ -15,9 +15,14 @@ import time
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
-from arcane.ai.postprocess import ProcessedResponse, ResponsePostProcessor
+from arcane.ai.guards import (
+    detect_debate_request,
+    detect_impossible_request,
+    looks_like_agreement,
+)
+from arcane.ai.postprocess import ISSUE_IMPLEMENTATION, ProcessedResponse, ResponsePostProcessor
 from arcane.ai.prompts import PromptBuilder, PromptContext
-from arcane.ai.providers.base import GenerationOptions, LLMProvider
+from arcane.ai.providers.base import ChatMessage, GenerationOptions, LLMProvider
 from arcane.personalities.base import Personality
 
 logger = logging.getLogger(__name__)
@@ -89,6 +94,7 @@ class ResponseManager:
             ProviderError: if the backend fails (after the provider's own retries).
         """
         messages = self._builder.build(context)
+        must_decline = _must_decline(context)
         speakers = {m.author_name for m in context.history if not m.is_self}
         recent_self = [m.content for m in context.history if m.is_self][-_RECENT_SELF_MESSAGES:]
 
@@ -99,6 +105,8 @@ class ResponseManager:
             processed = self._postprocessor.process(result.content, other_speakers=speakers)
 
             problem = self._problem_with(processed, recent_self)
+            if problem is None and must_decline and looks_like_agreement(processed.text):
+                problem = ISSUE_AGREES
             if problem is None:
                 return GeneratedReply(
                     parts=processed.parts,
@@ -118,6 +126,11 @@ class ResponseManager:
                 self._max_attempts,
                 problem,
             )
+            logger.debug("[%s] discarded draft: %r", self._personality.id, result.content[:200])
+            correction = _CORRECTIONS.get(problem)
+            if correction is not None and messages[-1].role == "user":
+                last = messages[-1]
+                messages = [*messages[:-1], ChatMessage("user", f"{last.content}\n{correction}")]
             options = replace(
                 options,
                 temperature=min((options.temperature or 0.8) + RETRY_TEMPERATURE_BOOST, 1.5),
@@ -140,6 +153,23 @@ class ResponseManager:
             ):
                 return "repeats a recent message"
         return None
+
+
+ISSUE_AGREES = "agrees to something it can't do"
+_CORRECTIONS = {
+    ISSUE_IMPLEMENTATION: "Say it as yourself, a regular person, with nothing about how you work.",
+    ISSUE_AGREES: "You can't do what they asked, so turn it down casually with a quick excuse.",
+}
+
+
+def _must_decline(context: PromptContext) -> bool:
+    """The message being answered asks for something the bot can't do."""
+    if context.mode == "initiate" or not context.target_message:
+        return False
+    names = context.personality.names
+    if detect_debate_request(context.target_message, names=names) is not None:
+        return False  # "bet, text debate" is a fine answer
+    return detect_impossible_request(context.target_message, names=names) is not None
 
 
 def _normalize(text: str) -> str:

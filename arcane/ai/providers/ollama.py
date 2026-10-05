@@ -7,7 +7,11 @@ concurrency:
 * a semaphore bounds in-flight requests, because Ollama typically serves one
   request at a time and queued requests would otherwise time out;
 * transient failures (connection errors, timeouts, 5xx) are retried with
-  exponential backoff and jitter; client errors are not.
+  exponential backoff and jitter; client errors are not;
+* models with a thinking mode (qwen3, deepseek-r1, ...) think before every
+  answer unless told not to, which makes a chat bot slow. Unless ``think`` is
+  configured, the provider asks Ollama once per model (``/api/show``) and turns
+  thinking off, or down to "low" for models that can't switch it off.
 """
 
 from __future__ import annotations
@@ -69,6 +73,7 @@ class OllamaProvider(LLMProvider):
         self._owns_session = session is None
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
         self._served_requests = 0
+        self._think: dict[str, bool | str | None] = {}
 
     @property
     def default_model(self) -> str:
@@ -99,8 +104,9 @@ class OllamaProvider(LLMProvider):
             payload["options"] = ollama_options
         if options.json_mode:
             payload["format"] = "json"
-        if self._settings.think is not None:
-            payload["think"] = self._settings.think
+        think = await self._think_value(model_name)
+        if think is not None:
+            payload["think"] = think
 
         started = time.monotonic()
         data = await self._request_with_retries("POST", "/api/chat", payload)
@@ -173,6 +179,15 @@ class OllamaProvider(LLMProvider):
         logger.info("Loaded %s in %.1fs", payload["model"], time.monotonic() - started)
         return True
 
+    async def version(self) -> str | None:
+        """The Ollama server version, or ``None`` if it can't be read."""
+        try:
+            data = await self._request("GET", "/api/version", None)
+        except ProviderError:
+            return None
+        version = data.get("version")
+        return str(version) if version else None
+
     async def list_models(self) -> tuple[str, ...]:
         """Names of the models installed on the Ollama server."""
         data = await self._request("GET", "/api/tags", None)
@@ -192,9 +207,11 @@ class OllamaProvider(LLMProvider):
         except ProviderError as exc:
             return ProviderHealth(available=False, detail=str(exc))
 
+        version = await self.version()
+        server = f"Ollama {version}: " if version else ""
         if model is None:
             return ProviderHealth(
-                available=True, detail=f"{len(models)} model(s) installed", models=models
+                available=True, detail=f"{server}{len(models)} model(s) installed", models=models
             )
         installed = {normalize_model_name(name) for name in models}
         model_available = normalize_model_name(model) in installed
@@ -204,7 +221,7 @@ class OllamaProvider(LLMProvider):
             else f"model '{model}' is not installed; run: ollama pull {model}"
         )
         return ProviderHealth(
-            available=True, detail=detail, model_available=model_available, models=models
+            available=True, detail=server + detail, model_available=model_available, models=models
         )
 
     async def close(self) -> None:
@@ -214,6 +231,35 @@ class OllamaProvider(LLMProvider):
             self._session = None
 
     # ---------------------------------------------------------------- internals
+
+    async def _think_value(self, model: str) -> bool | str | None:
+        """The ``think`` field for ``model``: configured, or chosen from its capabilities."""
+        if self._settings.think is not None:
+            return self._settings.think
+        if model in self._think:
+            return self._think[model]
+        value: bool | str | None = None
+        try:
+            data = await self._request("POST", "/api/show", {"model": model})
+        except ProviderError as exc:
+            logger.debug("Could not read the capabilities of %s: %s", model, exc)
+            data = {}
+        capabilities = data.get("capabilities")
+        if isinstance(capabilities, list) and "thinking" in capabilities:
+            thinking = data.get("thinking")
+            values = thinking.get("values") if isinstance(thinking, dict) else None
+            if isinstance(values, list) and values and False not in values:
+                value = "low" if "low" in values else None
+            else:
+                value = False
+            logger.info(
+                "%s has a thinking mode; %s for faster replies (set ARCANE_OLLAMA_THINK to "
+                "override)",
+                model,
+                f"using think={value!r}" if value else "turning it off",
+            )
+        self._think[model] = value
+        return value
 
     @staticmethod
     def _build_options(options: GenerationOptions) -> dict[str, Any]:

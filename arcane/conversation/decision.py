@@ -8,12 +8,14 @@ message. Rules, first match wins:
 1. Ignore its own messages, other bots (unless enabled), and empty messages.
 2. Direct messages: respond (if DMs are enabled).
 3. An @mention, or a reply to one of its messages: respond.
-4. Its name in the text: respond with high probability.
+4. Its name in the text: respond with high probability (always, when it comes
+   from the person it's talking with).
 5. Active conversation with a partner:
    * the partner keeps talking, not obviously to someone else: respond;
    * a participant talks after the partner went quiet: respond;
    * anyone else: ignore, keeping focus on the partner.
-6. Someone answers an opener the bot posted: respond.
+6. Someone answers a message the bot chimed in with (when it replied to a
+   person, only that person's answer counts): respond.
 7. A substantive message matching its interests in a quiet moment: small chance.
 8. Otherwise ignore.
 
@@ -153,16 +155,22 @@ class DecisionEngine:
             return Decision.respond(Reason.REPLY_TO_BOT, Priority.DIRECT)
 
         addressed_elsewhere = self._addressed_elsewhere(message)
-        if not addressed_elsewhere and self._personality.is_named_in(message.content):
-            if self._rng.random() < self._behavior.name_mention_reply_chance:
-                return Decision.respond(Reason.NAME_MENTIONED, Priority.NAMED)
-            return Decision.ignore(Reason.NAME_MENTIONED_SKIPPED)
-
-        if (
+        in_conversation = (
             conversation is not None
             and conversation.partner_id is not None
             and conversation.is_active(now, self._timeout)
-        ):
+        )
+        if not addressed_elsewhere and self._personality.is_named_in(message.content):
+            is_partner = (
+                in_conversation
+                and conversation is not None
+                and message.author_id == conversation.partner_id
+            )
+            if is_partner or self._rng.random() < self._behavior.name_mention_reply_chance:
+                return Decision.respond(Reason.NAME_MENTIONED, Priority.NAMED)
+            return Decision.ignore(Reason.NAME_MENTIONED_SKIPPED)
+
+        if in_conversation and conversation is not None:
             focus_decision = self._within_conversation(
                 message, conversation, now, addressed_elsewhere
             )
@@ -171,7 +179,7 @@ class DecisionEngine:
 
         if (
             conversation is not None
-            and conversation.awaiting_reply(now, self._opener_window)
+            and conversation.awaits_reply_from(message.author_id, now, self._opener_window)
             and not addressed_elsewhere
         ):
             return Decision.respond(Reason.OPENER_REPLY, Priority.CONTINUATION)

@@ -15,10 +15,11 @@ system prompt, while a false positive would make the bot refuse something nobody
 asked for. ``tests/data/guard_cases.json`` holds the positive and negative cases
 every change must keep passing.
 
-Two related helpers live here too: ``detect_debate_request`` spots someone
+Related helpers live here too: ``detect_debate_request`` spots someone
 inviting the bot to a debate (and whether they want it in voice, which it can
-only offer over text), and ``looks_like_agreement`` checks a drafted reply for
-"omw" or "sent" style answers to a request the bot can't fulfil.
+only offer over text), ``detect_identity_question`` spots someone asking or
+joking whether the bot is a bot, and ``looks_like_agreement`` checks a drafted
+reply for "omw" or "sent" style answers to a request the bot can't fulfil.
 
 Input is capped at ``MAX_SCAN_CHARS`` so matching time stays bounded no matter
 what someone pastes into the chat.
@@ -637,6 +638,44 @@ def detect_debate_request(text: str, *, names: Sequence[str] = ()) -> DebateRequ
     if any(pattern.search(text) for pattern in _DEBATE_PATTERNS):
         return DebateRequest(voice=_VOICE_HINT_RE.search(text) is not None)
     return None
+
+
+# ---------------------------------------------------------- identity questions
+
+_WHAT_IT_IS = r"(?:a\s+|an\s+)?(?:bot|ai|a\.i\.?|robot|chat\s?bot|npc|chatgpt|gpt|llm|program)"
+_IDENTITY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # "are you a bot", "r u an ai", "are you even real", "are u human"
+        rf"\b(?:are|r)\s+(?:you|u|ya)\s+(?:even\s+|actually\s+|really\s+|just\s+)?"
+        rf"(?:{_WHAT_IT_IS}\b|(?:real|human)\b(?=\s*(?:$|[?.,!]|or\b|rn\b|tho\b|lol|lmao|bro))|"
+        r"a\s+(?:real\s+)?(?:person|human)\b)",
+        # "u a bot?", "you an ai or what"
+        r"\b(?:you|u)\s+(?:a|an)\s+(?:bot|ai|robot|npc)\b",
+        # "you're a bot", "ur literally an ai", "this guy is a bot", "@bot is a bot"
+        rf"(?:\b(?:you'?re|youre|you\s+are|ur|u\s+r)|@bot\s+(?:is|iz))\s+"
+        rf"(?:literally\s+|definitely\s+|lowkey\s+|just\s+|totally\s+|so\s+)?{_WHAT_IT_IS}\b",
+        # "is this a bot", "is @bot an ai"
+        r"\bis\s+(?:this|that|it|he|@bot)\s+(?:a\s+|an\s+)?(?:bot|ai|robot|real\s+person)\b",
+        # "am i talking to a bot", "am i talking with a real person"
+        r"\bam\s+i\s+(?:talking|speaking|chatting|texting)\s+(?:to|with)\s+"
+        r"(?:a\s+|an\s+)?(?:bot|ai|robot|real\s+(?:person|human)|human|person)\b",
+        # "bot or human?", "human or ai"
+        r"\b(?:bot|ai)\s+or\s+(?:a\s+)?(?:human|person|real)\b|"
+        r"\b(?:human|person|real)\s+or\s+(?:a\s+)?(?:bot|ai)\b",
+    )
+)
+
+
+def detect_identity_question(text: str, *, names: Sequence[str] = ()) -> bool:
+    """True when ``text`` asks (or jokes) whether the bot is a bot or a real person.
+
+    "are you a bot", "r u real", "ur literally an ai", "is mp3 a bot", "am i
+    talking to a real person". Talk about bots in general ("the music bot is
+    down", "i made a discord bot") doesn't count.
+    """
+    text = _prepare(text, names)
+    return any(pattern.search(text) for pattern in _IDENTITY_PATTERNS)
 
 
 # --------------------------------------------------------------- agreements

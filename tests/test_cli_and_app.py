@@ -202,11 +202,11 @@ async def test_application_warns_when_backend_is_down(
     assert "Bots will stay silent" in caplog.text
 
 
-async def test_initiative_task_only_with_channels(
+async def test_initiative_task_runs_unless_disabled(
     tmp_path: Path, fake_ollama: tuple[FakeOllama, str]
 ) -> None:
-    quiet = _app(tmp_path, fake_ollama[1])
-    eager = _app(tmp_path, fake_ollama[1], initiative_channel_ids=(42,))
+    quiet = _app(tmp_path, fake_ollama[1], initiative_enabled=False)
+    eager = _app(tmp_path, fake_ollama[1])
     try:
         (quiet_runtime,) = [quiet._build_runtime(c) for c in quiet._bot_configs]
         (eager_runtime,) = [eager._build_runtime(c) for c in eager._bot_configs]

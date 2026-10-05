@@ -252,3 +252,54 @@ async def test_cache_and_load_metrics_are_reported(
     finally:
         await provider.close()
     assert "Ollama reloaded" in caplog.text
+
+
+async def test_thinking_is_turned_off_for_thinking_models(
+    fake_ollama: tuple[FakeOllama, str],
+) -> None:
+    fake, url = fake_ollama
+    fake.capabilities = {
+        "qwen3:8b": {"capabilities": ["completion", "thinking"]},
+        "gpt-oss:20b": {
+            "capabilities": ["completion", "thinking"],
+            "thinking": {"values": ["low", "medium", "high"], "default": "medium"},
+        },
+    }
+    provider = _provider(url)
+    try:
+        await provider.chat(MESSAGES, model="qwen3:8b")
+        await provider.chat(MESSAGES, model="qwen3:8b")
+        await provider.chat(MESSAGES, model="gpt-oss:20b")
+        await provider.chat(MESSAGES, model="llama3.1:8b")
+    finally:
+        await provider.close()
+
+    assert [r.get("think") for r in fake.requests] == [False, False, "low", None]
+    assert fake.shows == ["qwen3:8b", "gpt-oss:20b", "llama3.1:8b"]  # asked once per model
+
+
+async def test_configured_think_flag_wins(fake_ollama: tuple[FakeOllama, str]) -> None:
+    fake, url = fake_ollama
+    fake.capabilities = {"qwen3:8b": {"capabilities": ["completion", "thinking"]}}
+    provider = _provider(url, think=True)
+    try:
+        await provider.chat(MESSAGES, model="qwen3:8b")
+    finally:
+        await provider.close()
+    assert fake.requests[0]["think"] is True
+    assert fake.shows == []
+
+
+async def test_health_check_reports_the_server_version(
+    fake_ollama: tuple[FakeOllama, str],
+) -> None:
+    fake, url = fake_ollama
+    provider = _provider(url)
+    try:
+        health = await provider.health_check("llama3.1:8b")
+        fake.version = None
+        without = await provider.health_check("llama3.1:8b")
+    finally:
+        await provider.close()
+    assert health.detail.startswith("Ollama 0.35.1: ")
+    assert without.detail == "model 'llama3.1:8b' is installed"

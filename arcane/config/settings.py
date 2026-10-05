@@ -70,7 +70,8 @@ class OllamaSettings(BaseSettings):
     max_concurrent_requests: int = Field(default=1, ge=1, le=64)
     max_retries: int = Field(default=2, ge=0, le=10)
     think: bool | None = None
-    """Ollama's ``think`` flag. ``None`` omits it (for models without thinking)."""
+    """Ollama's ``think`` flag. ``None`` (the default) decides per model: thinking is
+    turned off for models that have a thinking mode, because it delays every reply."""
 
     @field_validator("base_url")
     @classmethod

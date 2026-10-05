@@ -11,6 +11,7 @@ from arcane.ai.guards import (
     MAX_SCAN_CHARS,
     DebateRequest,
     detect_debate_request,
+    detect_identity_question,
     detect_impossible_request,
     looks_like_agreement,
 )
@@ -184,3 +185,49 @@ def test_matching_time_is_bounded() -> None:
         looks_like_agreement(text)
         assert time.perf_counter() - started < 0.5
     assert MAX_SCAN_CHARS <= 2000
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "are you a bot",
+        "r u an ai?",
+        "wait are you even real",
+        "are u human",
+        "u a bot?",
+        "ur literally an ai lmao",
+        "you're a bot",
+        "is mp3 a bot",
+        "is this an ai",
+        "am i talking to a real person rn",
+        "bot or human?",
+        "be honest, are you actually a person",
+    ],
+)
+def test_identity_questions_are_detected(text: str) -> None:
+    assert detect_identity_question(text, names=NAMES)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the music bot is down again",
+        "i made a discord bot for my server",
+        "ai art is not real art",
+        "are you real good at chess",
+        "yo @bob are you a bot",
+        "do you think ai can be conscious",
+        "you're right about free will",
+    ],
+)
+def test_identity_negatives(text: str) -> None:
+    assert not detect_identity_question(text, names=NAMES)
+
+
+def test_overlapping_mentions_do_not_freeze_the_guards() -> None:
+    """Mention runs used to backtrack exponentially (seconds per message)."""
+    for text in ("@mp3 " + "@a." * 300, "@mp3 " + "@a, " * 200, "@x!" * 300):
+        started = time.perf_counter()
+        detect_impossible_request(text, names=NAMES)
+        detect_identity_question(text, names=NAMES)
+        assert time.perf_counter() - started < 0.2

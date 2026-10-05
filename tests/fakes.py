@@ -156,6 +156,10 @@ class FakeOllama:
     loads: list[dict[str, Any]] = field(default_factory=list)
     """Chat requests without messages, which Ollama treats as "load the model"."""
     load_duration_ns: int = 0
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    """``/api/show`` answers per model name; unknown models report plain completion."""
+    shows: list[str] = field(default_factory=list)
+    version: str | None = "0.35.1"
     delay: float = 0.0
     in_flight: int = 0
     max_in_flight: int = 0
@@ -191,6 +195,16 @@ class FakeOllama:
 
     async def tags(self, _request: web.Request) -> web.StreamResponse:
         return web.json_response({"models": [{"name": name} for name in self.models]})
+
+    async def show(self, request: web.Request) -> web.StreamResponse:
+        model = (await request.json())["model"]
+        self.shows.append(model)
+        return web.json_response(self.capabilities.get(model, {"capabilities": ["completion"]}))
+
+    async def version_info(self, _request: web.Request) -> web.StreamResponse:
+        if self.version is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response({"version": self.version})
 
 
 def chat_body(content: str) -> dict[str, Any]:

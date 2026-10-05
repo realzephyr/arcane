@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -99,16 +101,41 @@ def test_invalid_blocked_pattern_is_rejected() -> None:
 
 def test_mp3_persona_rules() -> None:
     """The owner's requirements for mp3, pinned so a persona edit can't drop them."""
-    import json
-
     mp3 = load_personality("mp3")
-    assert "!" not in json.dumps(mp3.model_dump(mode="json"))
+    persona_text = " ".join(
+        [
+            mp3.identity,
+            *mp3.traits,
+            *mp3.interests,
+            *mp3.style.guidelines,
+            *mp3.example_messages,
+            *mp3.conversation_topics,
+        ]
+    )
+    lowered = persona_text.lower()
+    assert "!" not in persona_text
     assert mp3.style.allow_exclamation_points is False
     assert mp3.style.lowercase_starts is True
+    # A normal 18-year-old who lives for debate and philosophy.
     assert "18 year old" in mp3.identity
-    assert "sincerely asks whether you're a bot or an ai you say yes" in mp3.identity
+    assert "debate" in mp3.identity and "philosophy" in mp3.identity
+    assert "text debate" in lowered and "never do vc or voice debates" in lowered
+    # Talks as a person: nothing in the persona primes it to think of itself as software.
+    for word in (" bot", " ai ", "code", "context", "model", "prompt", "program"):
+        assert word not in lowered, word
     guidelines = " ".join(mp3.style.guidelines).lower()
     assert "never type an exclamation point" in guidelines
-    assert "join vc" in guidelines and "never say yes" in guidelines
-    assert "no slurs" in guidelines and "no flirting" in guidelines
-    assert mp3.timing.typing_speed_wpm == 60
+    assert "say no with a casual excuse" in guidelines and "never 'maybe later'" in guidelines
+    assert "mild swears only" in guidelines and "never the f-word" in guidelines
+    assert "nothing sexual or flirty" in guidelines
+    # Chime-ins are about debate or philosophy.
+    assert len(mp3.conversation_topics) >= 25
+    assert mp3.behavior.initiative.enabled
+    # Family-friendly backstop.
+    assert mp3.style.blocked_patterns
+    blocked = [re.compile(pattern, re.IGNORECASE) for pattern in mp3.style.blocked_patterns]
+    for fine in ("damn", "hell no", "shit", "crap", "wtf", "therapist", "rapper", "grape"):
+        assert not any(pattern.search(fine) for pattern in blocked), fine
+    # Typing calibrated to the owner's examples ("nothing much" ~2 s, 107 chars ~7 s).
+    assert mp3.timing.typing_speed_wpm == 210
+    assert mp3.timing.typing_start_seconds == 1.2
